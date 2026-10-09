@@ -12,6 +12,8 @@ RESET_WORDS = {"reset", "default", "predeterminado"}
 
 @router.message(Command("modelo"))
 async def cmd_modelo(message: Message, command: CommandObject, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
     user_id = message.from_user.id
     arg = (command.args or "").strip()
 

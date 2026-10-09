@@ -51,11 +51,15 @@ async def cmd_ayuda(message: Message) -> None:
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     # Sirve para llenar GITHUB_OWNER_IDS en el .env
+    if message.from_user is None:
+        return
     await message.answer(f"Tu id de Telegram es {message.from_user.id}")
 
 
 @router.message(Command("reset"))
 async def cmd_reset(message: Message, ai: GroqService) -> None:
     # `ai` llega automáticamente desde dp["ai"] en main.py
+    if message.from_user is None:
+        return
     ai.reset(message.from_user.id)
     await message.answer("Listo, memoria borrada ✨ ¿De qué hablamos ahora?")

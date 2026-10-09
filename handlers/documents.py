@@ -22,6 +22,8 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB: también es el límite de descarga de
 
 @router.message(F.document)
 async def handle_document(message: Message, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
     doc = message.document
     name = doc.file_name or "documento"
 
@@ -65,6 +67,8 @@ async def handle_document(message: Message, ai: GroqService) -> None:
 
 @router.message(Command("cerrardoc"))
 async def cmd_cerrardoc(message: Message, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
     if ai.clear_document(message.from_user.id):
         await message.answer("Listo, olvidé el documento 📎 ¿Qué más?")
     else:

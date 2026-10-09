@@ -13,6 +13,8 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB: límite prudente para no descargar ar
 
 @router.message(F.photo)
 async def handle_photo(message: Message, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
     photo = message.photo[-1]  # Telegram manda varias resoluciones; tomamos la más grande
     file = await message.bot.get_file(photo.file_id)
 
@@ -39,6 +41,8 @@ async def handle_photo(message: Message, ai: GroqService) -> None:
 
 @router.message(F.voice)
 async def handle_voice(message: Message, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
     voice = message.voice
 
     if voice.file_size and voice.file_size > MAX_FILE_SIZE:
