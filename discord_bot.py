@@ -69,7 +69,7 @@ class DiscordFront(discord.Client):
             await message.reply(f"Tu id de Discord es {message.author.id}")
             return
         if command == "reset":
-            self.ai.reset(message.author.id)
+            self.ai.reset(message.author.id, platform="discord")
             await message.reply("Listo, memoria borrada ✨")
             return
         if command in ("ayuda", "help"):

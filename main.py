@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher
 from config import load_settings
 from handlers import chat, documents, media, model, notes, reminders, start
 from handlers.start import BOT_COMMANDS
-from middlewares import RateLimitMiddleware
+from middlewares import RateLimitMiddleware, UserGuardMiddleware
 from services.github import GitHubService
 from services.groq_service import GroqService
 from services.notion import NotionService
@@ -23,6 +23,10 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_token)
     dp = Dispatcher()
+
+    dp.message.outer_middleware(
+        UserGuardMiddleware(settings.allowed_user_ids, settings.daily_message_limit)
+    )
 
     # Límite de mensajes por usuario: protege tu cuota de Groq de ráfagas o abusos
     if settings.rate_limit_messages > 0:

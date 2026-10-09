@@ -25,6 +25,8 @@ class Settings:
     timezone: str | None  # Zona por defecto de los recordatorios (cada chat puede cambiarla con /zona)
     rate_limit_messages: int  # Mensajes máximos por usuario en la ventana (0 = sin límite)
     rate_limit_window: int  # Segundos de la ventana
+    allowed_user_ids: frozenset[int]  # Lista blanca de Telegram; vacía = público
+    daily_message_limit: int  # Mensajes diarios por usuario; 0 = sin límite
     discord_token: str | None  # Si existe, el agente también atiende en Discord
     discord_dm_ids: frozenset[int]  # Ids de Discord a los que el agente puede escribir por DM
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
@@ -96,6 +98,13 @@ def load_settings() -> Settings:
 
     rate_limit_messages = max(int(os.getenv("RATE_LIMIT_MESSAGES", "10")), 0)
     rate_limit_window = max(int(os.getenv("RATE_LIMIT_WINDOW", "60")), 1)
+    try:
+        allowed_user_ids = frozenset(
+            int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError("ALLOWED_USER_IDS debe ser una lista de números: 123456,789012") from None
+    daily_message_limit = max(int(os.getenv("DAILY_MESSAGE_LIMIT", "0")), 0)
 
     timezone = os.getenv("TIMEZONE") or None
     if timezone:
@@ -134,6 +143,8 @@ def load_settings() -> Settings:
         timezone=timezone,
         rate_limit_messages=rate_limit_messages,
         rate_limit_window=rate_limit_window,
+        allowed_user_ids=allowed_user_ids,
+        daily_message_limit=daily_message_limit,
         discord_token=discord_token,
         discord_dm_ids=discord_dm_ids,
         github_token=github_token,
