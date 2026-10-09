@@ -14,7 +14,7 @@ REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$")
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", "dist", "build", ".next", "vendor"}
 MAX_TREE = 300  # Archivos máximos al listar un repo
 MAX_FILE_BYTES = 500_000
-CHUNK_CHARS = 5000  # Texto por lectura: el agente pagina con start_line si el archivo es largo
+CHUNK_CHARS = 3500  # Texto por lectura: el agente pagina con start_line si el archivo es largo
 
 
 class GitHubError(Exception):

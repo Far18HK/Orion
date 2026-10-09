@@ -636,7 +636,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "github_read_file",
-        "Lee un archivo del repo con números de línea. Devuelve ~5000 caracteres por llamada; "
+        "Lee un archivo del repo con números de línea. Devuelve ~3500 caracteres por llamada; "
         "si el archivo sigue, repite con el start_line que indica el final. Lee solo lo relevante.",
         {
             "repo": _str("'nombre' o 'usuario/nombre'."),

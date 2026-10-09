@@ -1,6 +1,7 @@
 """Servicio que habla con Groq (modelos Llama) y guarda el contexto de cada usuario."""
 import asyncio
 import base64
+import json
 import logging
 import time
 from collections import defaultdict, deque
@@ -54,6 +55,12 @@ AUDIO_MODEL = "whisper-large-v3-turbo"
 NON_CHAT_KEYWORDS = ("whisper", "guard", "tts", "orpheus", "embed")
 MODELS_CACHE_SECONDS = 600
 
+# Presupuesto de contexto por petición (en tokens estimados). Groq limita los tokens por minuto
+# según tu plan; en el tier gratis algunos modelos aceptan solo ~6-8k por petición.
+MAX_PROMPT_TOKENS = 5500
+CHARS_PER_TOKEN = 3  # Estimación conservadora para español y código
+OLD_RESULT_CHARS = 300  # Cuánto queda de un resultado de herramienta viejo al recortarlo
+RETRY_WAIT_MAX = 20  # Segundos máximos que esperamos un 429 antes de reintentar
 MAX_TOOL_ROUNDS = 8  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
 
 
@@ -130,8 +137,15 @@ class GroqService:
             return GroqError(
                 "Uf, me están preguntando demasiado rápido 😅 Espera un momento y reintenta."
             )
+        if status == 413:
+            return GroqError(
+                "Eso me quedó demasiado grande para mi cuota de Groq (413) 😅 "
+                "Pídeme algo más acotado (un archivo o una carpeta) o prueba otro modelo con /modelo."
+            )
         if status is not None:
-            return GroqError("Groq no me contestó bien 🤕 Inténtalo de nuevo en un rato.")
+            return GroqError(
+                f"Groq no me contestó bien 🤕 (error {status}). Inténtalo de nuevo en un rato."
+            )
         return GroqError("Algo se rompió por mi lado 🔧 Intenta otra vez.")
 
     def _context_messages(self, user_id: int, ctx: ToolContext) -> list[dict]:
@@ -159,23 +173,74 @@ class GroqService:
         messages.extend(self._history[user_id])
         return messages
 
+    @staticmethod
+    def _estimate_tokens(messages: list[dict], tools: list[dict] | None) -> int:
+        chars = len(json.dumps(messages, ensure_ascii=False)) + len(json.dumps(tools or []))
+        return chars // CHARS_PER_TOKEN
+
+    @staticmethod
+    def _shrink_one(messages: list[dict], keep_latest_round: bool = True) -> bool:
+        """Recorta el resultado de herramienta más viejo que todavía sea largo.
+
+        Con `keep_latest_round` protege los resultados de la última vuelta, que el modelo
+        aún no ha leído. Devuelve True si recortó algo.
+        """
+        last_assistant = max(
+            (i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1
+        )
+        limit = last_assistant if keep_latest_round else len(messages)
+        for i, m in enumerate(messages[:limit]):
+            if m["role"] == "tool" and len(m["content"]) > OLD_RESULT_CHARS + 40:
+                m["content"] = m["content"][:OLD_RESULT_CHARS] + " […recortado para ahorrar espacio]"
+                return True
+        return False
+
+    def _fit_budget(self, messages: list[dict], tools: list[dict] | None) -> None:
+        while (
+            self._estimate_tokens(messages, tools) > MAX_PROMPT_TOKENS
+            and self._shrink_one(messages)
+        ):
+            pass
+
+    @staticmethod
+    def _retry_after(e: Exception) -> float:
+        headers = getattr(getattr(e, "response", None), "headers", None) or {}
+        try:
+            return min(float(headers.get("retry-after", 5)), RETRY_WAIT_MAX)
+        except (TypeError, ValueError):
+            return 5.0
+
     async def _complete(self, model: str, messages: list[dict], tools: list[dict] | None):
         kwargs = {"model": model, "messages": messages, "temperature": 0.6}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        try:
-            return await self.client.chat.completions.create(**kwargs)
-        except Exception as e:
-            # Un 400 en la primera llamada suele ser un modelo sin soporte de herramientas:
-            # reintentamos sin ellas en vez de dejar al usuario sin respuesta
-            no_tool_history = not any(m["role"] == "tool" for m in messages)
-            if tools and no_tool_history and getattr(e, "status_code", None) == 400:
-                logger.warning("El modelo %s rechazó las herramientas; reintento sin ellas", model)
-                kwargs.pop("tools")
-                kwargs.pop("tool_choice")
+        for attempt in range(3):
+            try:
                 return await self.client.chat.completions.create(**kwargs)
-            raise
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                last = attempt == 2
+                has_tool_history = any(m["role"] == "tool" for m in messages)
+                if status == 400 and "tool_use_failed" in str(e) and not last:
+                    # El modelo armó mal la llamada a una herramienta: es aleatorio, otro intento suele salir bien
+                    logger.warning("tool_use_failed, reintento (%s)", attempt + 1)
+                elif status == 400 and "tools" in kwargs and not has_tool_history:
+                    # Un 400 en la primera llamada suele ser un modelo sin soporte de herramientas
+                    logger.warning("El modelo %s rechazó las herramientas; reintento sin ellas", model)
+                    kwargs.pop("tools")
+                    kwargs.pop("tool_choice")
+                elif status == 413 and not last and self._shrink_one(messages, keep_latest_round=False):
+                    # Petición demasiado grande para la cuota: recortamos resultados viejos y reintentamos
+                    logger.warning("413 de Groq: recorto resultados de herramientas y reintento")
+                    while self._shrink_one(messages, keep_latest_round=False):
+                        pass
+                elif status == 429 and not last:
+                    wait = self._retry_after(e)
+                    logger.warning("429 de Groq: espero %.0fs y reintento", wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
     @staticmethod
     async def _run_call(call, ctx: ToolContext) -> dict:
@@ -210,9 +275,9 @@ class GroqService:
         try:
             # En la última vuelta no se ofrecen herramientas: obliga al modelo a responder
             for round_number in range(MAX_TOOL_ROUNDS + 1):
-                response = await self._complete(
-                    model, messages, tools=specs if round_number < MAX_TOOL_ROUNDS else None
-                )
+                round_tools = specs if round_number < MAX_TOOL_ROUNDS else None
+                self._fit_budget(messages, round_tools)
+                response = await self._complete(model, messages, tools=round_tools)
                 message = response.choices[0].message
                 if not message.tool_calls:
                     break
