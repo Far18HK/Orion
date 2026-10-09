@@ -27,7 +27,7 @@ def split_text(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
 @router.message()  # Sin filtro: atrapa todo lo que no manejaron los routers anteriores
 async def chat_with_ai(message: Message, ai: GroqService) -> None:
     if not message.text:
-        await message.answer("Por ahora solo entiendo texto, fotos y notas de voz 📝")
+        await message.answer("Por ahora entiendo texto, fotos, notas de voz y documentos 📝")
         return
 
     # Muestra "escribiendo..." mientras el modelo piensa
