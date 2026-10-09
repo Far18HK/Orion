@@ -33,7 +33,7 @@ async def chat_with_ai(message: Message, ai: GroqService) -> None:
     # Muestra "escribiendo..." mientras el modelo piensa
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
         try:
-            answer = await ai.ask(message.from_user.id, message.text)
+            answer = await ai.ask(message.from_user.id, message.text, chat_id=message.chat.id)
         except GroqError as e:
             await message.answer(str(e))
             return

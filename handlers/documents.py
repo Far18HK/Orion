@@ -44,7 +44,9 @@ async def handle_document(message: Message, ai: GroqService) -> None:
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
         try:
             text, truncated = await extract_text(buffer.read(), name)
-            answer = await ai.ask_about_document(message.from_user.id, name, text, question)
+            answer = await ai.ask_about_document(
+                message.from_user.id, name, text, question, chat_id=message.chat.id
+            )
         except (DocumentError, GroqError) as e:
             await message.answer(str(e))
             return

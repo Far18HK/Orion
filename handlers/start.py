@@ -26,7 +26,10 @@ HELP_TEXT = (
     "Comandos disponibles:\n"
     + "\n".join(f"/{name} — {desc}" for name, desc in COMMANDS)
     + "\n\nTambién puedes escribirme normal o mandarme fotos, notas de voz y documentos "
-    "(PDF, DOCX, texto). Busco en internet y te digo el clima cuando haga falta."
+    "(PDF, DOCX, texto). Soy un agente: puedes pedirme las cosas en lenguaje normal "
+    "(\"avísame mañana a las 8 de la junta\", \"anota comprar leche\", \"qué clima hace en Lima\", "
+    "\"cancela mi recordatorio de la junta\") y yo decido qué herramienta usar: buscar en internet, "
+    "leer enlaces, recordatorios, notas, calculadora, clima y hora."
 )
 
 
