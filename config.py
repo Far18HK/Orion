@@ -33,6 +33,8 @@ class Settings:
     discord_monitor_user_ids: frozenset[int]  # Usuarios de Discord que pueden leer canales
     discord_monitor_telegram_ids: frozenset[int]  # Usuarios de Telegram autorizados a leer Discord
     discord_monitor_channel_ids: frozenset[int]  # Canales de Discord que se pueden consultar
+    discord_write_channel_ids: frozenset[int]  # Canales de Discord donde se puede escribir
+    require_approval_for_discord: bool
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
@@ -112,6 +114,7 @@ def load_settings() -> Settings:
     except ValueError:
         raise RuntimeError("ALLOWED_USER_IDS debe ser una lista de números: 123456,789012") from None
     daily_message_limit = max(int(os.getenv("DAILY_MESSAGE_LIMIT", "0")), 0)
+    require_approval_for_discord = os.getenv("REQUIRE_APPROVAL_FOR_DISCORD", "true").lower() not in {"0", "false", "no"}
 
     timezone = os.getenv("TIMEZONE") or None
     if timezone:
@@ -138,6 +141,9 @@ def load_settings() -> Settings:
         )
         discord_monitor_channel_ids = frozenset(
             int(x) for x in os.getenv("DISCORD_MONITOR_CHANNEL_IDS", "").replace(" ", "").split(",") if x
+        )
+        discord_write_channel_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_WRITE_CHANNEL_IDS", "").replace(" ", "").split(",") if x
         )
     except ValueError:
         raise RuntimeError(
@@ -172,6 +178,8 @@ def load_settings() -> Settings:
         discord_monitor_user_ids=discord_monitor_user_ids,
         discord_monitor_telegram_ids=discord_monitor_telegram_ids,
         discord_monitor_channel_ids=discord_monitor_channel_ids,
+        discord_write_channel_ids=discord_write_channel_ids,
+        require_approval_for_discord=require_approval_for_discord,
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,

@@ -9,6 +9,7 @@ from handlers import chat, documents, media, model, notes, reminders, start
 from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware, UserGuardMiddleware
 from services.github import GitHubService
+from services.assistant_store import AssistantStore
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
@@ -44,6 +45,8 @@ async def main() -> None:
     )
     reminder_service.start()
     dp["reminders"] = reminder_service
+    assistant_store = AssistantStore(settings.db_path)
+    dp["assistant_store"] = assistant_store
 
     # Notion es opcional: si no hay credenciales, /nota avisa en vez de fallar
     if settings.notion_token and settings.notion_database_id:
@@ -76,7 +79,10 @@ async def main() -> None:
         discord_monitor_user_ids=settings.discord_monitor_user_ids,
         discord_monitor_telegram_ids=settings.discord_monitor_telegram_ids,
         discord_monitor_channel_ids=settings.discord_monitor_channel_ids,
+        discord_write_channel_ids=settings.discord_write_channel_ids,
+        require_approval_for_discord=settings.require_approval_for_discord,
         multi_brain_size=settings.multi_brain_size,
+        store=assistant_store,
     )
     dp["ai"] = ai
 
