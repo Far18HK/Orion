@@ -38,7 +38,7 @@ def load_settings() -> Settings:
     return Settings(
         telegram_token=token,
         groq_api_key=api_key,
-        groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         max_history=max(max_history, 2),
         notion_token=notion_token,
         notion_database_id=notion_database_id,
