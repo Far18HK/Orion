@@ -10,7 +10,9 @@ router = Router()
 # Fuente única: alimenta el menú de Telegram (botón "/") y el texto de /ayuda
 COMMANDS = [
     ("ayuda", "Muestra esta ayuda"),
-    ("recordar", "Programa un recordatorio. Ej: /recordar 30m Tomar agua"),
+    ("recordar", "Programa un recordatorio: 30m, mañana 8:00, cada lunes 9:00..."),
+    ("recordatorios", "Mira y cancela tus recordatorios pendientes"),
+    ("zona", "Ve o cambia tu zona horaria"),
     ("nota", "Guarda una nota en Notion. Ej: /nota Comprar leche #casa"),
     ("notas", "Muestra tus últimas notas de Notion"),
     ("buscarnota", "Busca notas por texto o #etiqueta"),
