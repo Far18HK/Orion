@@ -26,6 +26,7 @@ class Settings:
     rate_limit_messages: int  # Mensajes máximos por usuario en la ventana (0 = sin límite)
     rate_limit_window: int  # Segundos de la ventana
     discord_token: str | None  # Si existe, el agente también atiende en Discord
+    discord_dm_ids: frozenset[int]  # Ids de Discord a los que el agente puede escribir por DM
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
@@ -103,6 +104,12 @@ def load_settings() -> Settings:
             ) from None
 
     discord_token = os.getenv("DISCORD_TOKEN") or None
+    try:
+        discord_dm_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_DM_IDS", "").replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError("DISCORD_DM_IDS debe ser una lista de números: 123456,789012") from None
     github_token = os.getenv("GITHUB_TOKEN") or None
     try:
         github_owner_ids = frozenset(
@@ -125,6 +132,7 @@ def load_settings() -> Settings:
         rate_limit_messages=rate_limit_messages,
         rate_limit_window=rate_limit_window,
         discord_token=discord_token,
+        discord_dm_ids=discord_dm_ids,
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,

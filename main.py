@@ -67,6 +67,8 @@ async def main() -> None:
         notion=dp["notion"],
         github=github,
         github_user_ids=settings.github_owner_ids,
+        discord_token=settings.discord_token,
+        discord_dm_ids=settings.discord_dm_ids,
     )
     dp["ai"] = ai
 
