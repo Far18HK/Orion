@@ -63,8 +63,14 @@ class NotionService:
         def first(kind: str) -> str | None:
             return next((name for name, p in props.items() if p.get("type") == kind), None)
 
+        title_col = first("title")
+        if not title_col:
+            raise NotionError(
+                "No encontré ninguna columna de título en tu base de datos de Notion 😕 "
+                "Asegúrate de que tenga al menos una columna de tipo Título."
+            )
         self._schema = _Schema(
-            title=first("title") or "Name", date=first("date"), tags=first("multi_select")
+            title=title_col, date=first("date"), tags=first("multi_select")
         )
         return self._schema
 
