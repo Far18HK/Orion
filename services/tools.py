@@ -53,6 +53,8 @@ class ToolContext:
     notion: NotionService | None = None
     github: GitHubService | None = None  # Solo para los dueños autorizados (ver GroqService.ask)
     platform: str = "telegram"  # "telegram" | "discord": decide por dónde llegan los recordatorios
+    discord_token: str | None = None  # Solo para usuarios autorizados a mandar DMs (ver GroqService.ask)
+    discord_dm_ids: frozenset[int] = frozenset()  # Únicos destinatarios permitidos
 
 
 def format_now(now: datetime) -> str:
@@ -465,6 +467,44 @@ async def _t_count_notes(ctx: ToolContext, args: dict) -> str:
     return f"Hay {len(notes)} nota(s)." + (f" Etiquetas: {summary}." if summary else "")
 
 
+# ---------------------------------------------------------------- Discord (mensajes directos)
+
+async def _t_send_discord_dm(ctx: ToolContext, args: dict) -> str:
+    text = str(args.get("text", "")).strip()
+    if not text:
+        return "Error: el mensaje está vacío."
+    raw = str(args.get("discord_user_id") or "").strip()
+    if not raw and ctx.platform == "discord":
+        raw = str(ctx.user_id)  # Pidió desde Discord: «mándame» = a él mismo
+    if not raw.isdigit():
+        return "Error: falta el id de Discord del destinatario (solo números)."
+    recipient = int(raw)
+    if recipient not in ctx.discord_dm_ids:
+        return "Error: ese id no está autorizado para recibir mensajes. Díselo al usuario."
+
+    base = "https://discord.com/api/v10"
+    headers = {
+        "Authorization": f"Bot {ctx.discord_token}",
+        "User-Agent": "DiscordBot (asistente, 1.0)",
+    }
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, headers=headers) as session:
+        async with session.post(f"{base}/users/@me/channels", json={"recipient_id": str(recipient)}) as r:
+            if r.status != 200:
+                return f"Error: Discord no abrió el chat privado (HTTP {r.status})."
+            channel_id = (await r.json())["id"]
+        async with session.post(
+            f"{base}/channels/{channel_id}/messages", json={"content": text[:2000]}
+        ) as r:
+            if r.status == 403:
+                return (
+                    "Error: Discord no deja escribirle a ese usuario. Debe compartir un servidor "
+                    "con el bot y tener los mensajes directos abiertos."
+                )
+            if r.status not in (200, 201):
+                return f"Error: Discord rechazó el mensaje (HTTP {r.status})."
+    return "Mensaje enviado por Discord."
+
+
 # ---------------------------------------------------------------- GitHub (solo lectura)
 
 def _gh(fn):
@@ -709,6 +749,22 @@ TOOLS: list[Tool] = [
         (),
         _t_count_notes,
         needs="notion",
+    ),
+    Tool(
+        "send_discord_dm",
+        "Envía un mensaje directo de Discord. Úsala cuando el usuario pida que le escribas o "
+        "avises por Discord. Solo funciona con ids de Discord autorizados. No puedes leer "
+        "mensajes de Discord con esta herramienta, solo enviarlos.",
+        {
+            "text": _str("Mensaje a enviar."),
+            "discord_user_id": _str(
+                "Id numérico de Discord del destinatario. Si el usuario ya escribe desde "
+                "Discord y dice «mándame», puede omitirse."
+            ),
+        },
+        ("text",),
+        _t_send_discord_dm,
+        needs="discord_token",
     ),
     Tool(
         "github_list_repos",

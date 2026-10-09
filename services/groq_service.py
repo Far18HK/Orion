@@ -82,6 +82,8 @@ class GroqService:
         notion: NotionService | None = None,
         github: GitHubService | None = None,
         github_user_ids: frozenset[int] = frozenset(),
+        discord_token: str | None = None,
+        discord_dm_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.client = AsyncGroq(api_key=api_key)
         self.model = model
@@ -91,6 +93,9 @@ class GroqService:
         # GitHub da acceso a repos privados: solo se ofrece a estos ids de Telegram
         self.github = github
         self.github_user_ids = github_user_ids
+        # Mandar DMs de Discord: solo a ids autorizados y solo a pedido de dueños (o del propio destinatario)
+        self.discord_token = discord_token
+        self.discord_dm_ids = discord_dm_ids
         # Historial por usuario: deque descarta solo los mensajes más viejos
         self._history: dict[int, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
         # Documento cargado por usuario: (nombre, texto). Uno a la vez
@@ -269,6 +274,13 @@ class GroqService:
             notion=self.notion,
             github=self.github if user_id in self.github_user_ids else None,
             platform=platform,
+            discord_token=(
+                self.discord_token
+                if self.discord_dm_ids
+                and (user_id in self.github_user_ids or user_id in self.discord_dm_ids)
+                else None
+            ),
+            discord_dm_ids=self.discord_dm_ids,
         )
         specs = build_tool_specs(ctx)
         messages = [*self._context_messages(user_id, ctx), {"role": "user", "content": text}]
