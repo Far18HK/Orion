@@ -1,9 +1,9 @@
-"""Handler principal: cualquier texto se envía a Gemini."""
+"""Handler principal: cualquier texto se envía a Groq."""
 from aiogram import Router
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from services.gemini import GeminiError, GeminiService
+from services.groq_service import GroqError, GroqService
 
 router = Router()
 
@@ -25,16 +25,16 @@ def split_text(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
 
 
 @router.message()  # Sin filtro: atrapa todo lo que no manejaron los routers anteriores
-async def chat_with_gemini(message: Message, gemini: GeminiService) -> None:
+async def chat_with_ai(message: Message, ai: GroqService) -> None:
     if not message.text:
         await message.answer("Por ahora solo entiendo texto, fotos y notas de voz 📝")
         return
 
-    # Muestra "escribiendo..." mientras Gemini piensa
+    # Muestra "escribiendo..." mientras el modelo piensa
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
         try:
-            answer = await gemini.ask(message.from_user.id, message.text)
-        except GeminiError as e:
+            answer = await ai.ask(message.from_user.id, message.text)
+        except GroqError as e:
             await message.answer(str(e))
             return
 
