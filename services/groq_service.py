@@ -15,7 +15,7 @@ SYSTEM_PROMPT = (
 )
 
 # Modelos: uno para texto (configurable), uno fijo para visión y otro para transcribir audio
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_MODEL = "qwen/qwen3.8-27b"
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
 
