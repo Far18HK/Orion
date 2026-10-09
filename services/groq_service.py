@@ -5,6 +5,8 @@ import json
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from groq import AsyncGroq
 
@@ -75,7 +77,7 @@ def is_chat_model(model_id: str) -> bool:
 class GroqService:
     def __init__(
         self,
-        api_key: str,
+        api_keys: Sequence[str],
         model: str,
         max_history: int,
         reminders: ReminderService | None = None,
@@ -85,7 +87,14 @@ class GroqService:
         discord_token: str | None = None,
         discord_dm_ids: frozenset[int] = frozenset(),
     ) -> None:
-        self.client = AsyncGroq(api_key=api_key)
+        if not api_keys:
+            raise ValueError("GroqService necesita al menos una API key de Groq")
+        # Una cuenta de Groq por key: si la activa agota su cuota diaria (TPD), pasamos a la
+        # siguiente sin que el usuario note nada (ver _complete). Todas comparten el mismo
+        # historial y las mismas herramientas; solo cambia quién paga la petición.
+        self._clients = [AsyncGroq(api_key=k) for k in api_keys]
+        self._active = 0
+        self._active_reset_day = datetime.now(timezone.utc).date()
         self.model = model
         # Servicios a los que el agente puede llegar mediante herramientas
         self.reminders = reminders
@@ -103,6 +112,30 @@ class GroqService:
         # Modelo elegido con /modelo por usuario (si no hay, se usa el predeterminado)
         self._models: dict[int, str] = {}
         self._models_cache: tuple[float, list[str]] | None = None
+
+    @property
+    def client(self) -> AsyncGroq:
+        """Cliente de la cuenta activa (la que se usa en la próxima petición)."""
+        return self._clients[self._active]
+
+    def _reset_active_client_if_new_day(self) -> None:
+        """Vuelve a la cuenta #1 al cambiar el día UTC, por si su cuota diaria ya se liberó."""
+        today = datetime.now(timezone.utc).date()
+        if today != self._active_reset_day:
+            if self._active != 0:
+                logger.info("Nuevo día: vuelvo a la cuenta Groq #1")
+            self._active = 0
+            self._active_reset_day = today
+
+    @staticmethod
+    def _is_daily_token_limit(e: Exception) -> bool:
+        """Distingue el 429 de cuota diaria (TPD, no tiene sentido reintentar) del de ráfaga."""
+        body = getattr(e, "body", None)
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        if error.get("code") == "rate_limit_exceeded" and error.get("type") == "tokens":
+            return True
+        text = str(e)
+        return "tokens per day" in text or "(TPD)" in text
 
     def reset(self, user_id: int) -> None:
         """Borra la memoria de un usuario (conversación y documento)."""
@@ -216,18 +249,30 @@ class GroqService:
             return 5.0
 
     async def _complete(self, model: str, messages: list[dict], tools: list[dict] | None):
+        self._reset_active_client_if_new_day()
         kwargs = {"model": model, "messages": messages, "temperature": 0.6}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        for attempt in range(3):
+        # Un intento "normal" por vuelta de reintento, más uno extra por cada cuenta de reserva
+        # (el cambio de cuenta no debería comerse los reintentos pensados para errores transitorios).
+        max_attempts = 3 + (len(self._clients) - 1)
+        for attempt in range(max_attempts):
             try:
                 return await self.client.chat.completions.create(**kwargs)
             except Exception as e:
                 status = getattr(e, "status_code", None)
-                last = attempt == 2
+                last = attempt == max_attempts - 1
                 has_tool_history = any(m["role"] == "tool" for m in messages)
-                if status == 400 and "tool_use_failed" in str(e) and not last:
+                if status == 429 and self._is_daily_token_limit(e) and self._active + 1 < len(self._clients):
+                    # Esta cuenta agotó su cuota diaria (no se arregla esperando): paso a la
+                    # siguiente YA, sin dormir, y sigo la MISMA conversación con el mismo historial.
+                    self._active += 1
+                    logger.warning(
+                        "Cuenta Groq #%s agotó su cuota diaria (TPD); paso a la cuenta #%s",
+                        self._active, self._active + 1,
+                    )
+                elif status == 400 and "tool_use_failed" in str(e) and not last:
                     # El modelo armó mal la llamada a una herramienta: es aleatorio, otro intento suele salir bien
                     logger.warning("tool_use_failed, reintento (%s)", attempt + 1)
                 elif status == 400 and "tools" in kwargs and not has_tool_history:
