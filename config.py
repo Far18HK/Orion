@@ -17,7 +17,7 @@ DB_FILENAME = "reminders.db"
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
-    groq_api_key: str
+    groq_api_keys: tuple[str, ...]  # Una o varias; si una cuenta agota su cuota diaria, pasa a la siguiente
     groq_model: str
     max_history: int  # Cantidad de mensajes que recuerda (pregunta + respuesta cuentan por separado)
     notion_token: str | None
@@ -75,12 +75,15 @@ def check_db_dir(path: str) -> None:
 
 def load_settings() -> Settings:
     token = os.getenv("TELEGRAM_TOKEN")
-    api_key = os.getenv("GROQ_API_KEY")
+    # GROQ_API_KEYS acepta varias cuentas separadas por coma (gsk_abc,gsk_def) para repartir
+    # la cuota diaria entre ellas; GROQ_API_KEY (una sola) se mantiene por compatibilidad.
+    raw_keys = os.getenv("GROQ_API_KEYS") or os.getenv("GROQ_API_KEY") or ""
+    groq_api_keys = tuple(k.strip() for k in raw_keys.split(",") if k.strip())
 
     # Si falta algo esencial, mejor fallar al arrancar que a medio chat
-    if not token or not api_key:
+    if not token or not groq_api_keys:
         raise RuntimeError(
-            "Faltan variables de entorno: TELEGRAM_TOKEN y/o GROQ_API_KEY. Revisa tu .env"
+            "Faltan variables de entorno: TELEGRAM_TOKEN y/o GROQ_API_KEYS/GROQ_API_KEY. Revisa tu .env"
         )
 
     # Forzamos número par para que el historial siempre quede en pares usuario/modelo
@@ -123,7 +126,7 @@ def load_settings() -> Settings:
 
     return Settings(
         telegram_token=token,
-        groq_api_key=api_key,
+        groq_api_keys=groq_api_keys,
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         max_history=max(max_history, 2),
         notion_token=notion_token,

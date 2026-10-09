@@ -60,7 +60,7 @@ async def main() -> None:
 
     # El agente se crea al final porque sus herramientas usan recordatorios y Notion
     ai = GroqService(
-        api_key=settings.groq_api_key,
+        api_keys=settings.groq_api_keys,
         model=settings.groq_model,
         max_history=settings.max_history,
         reminders=reminder_service,
