@@ -8,6 +8,7 @@ from config import load_settings
 from handlers import chat, documents, media, model, notes, reminders, start
 from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware
+from services.github import GitHubService
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
@@ -48,6 +49,14 @@ async def main() -> None:
         dp["notion"] = None
         logging.warning("NOTION_TOKEN/NOTION_DATABASE_ID no configurados: /nota quedará deshabilitado")
 
+    # GitHub es opcional y de solo lectura. Como da acceso a repos privados y el bot es público,
+    # exigimos GITHUB_OWNER_IDS: sin ids no se activa
+    github = None
+    if settings.github_token and settings.github_owner_ids:
+        github = GitHubService(settings.github_token)
+    elif settings.github_token:
+        logging.warning("GITHUB_TOKEN sin GITHUB_OWNER_IDS: GitHub deshabilitado (usa /id para ver tu id)")
+
     # El agente se crea al final porque sus herramientas usan recordatorios y Notion
     dp["ai"] = GroqService(
         api_key=settings.groq_api_key,
@@ -55,6 +64,8 @@ async def main() -> None:
         max_history=settings.max_history,
         reminders=reminder_service,
         notion=dp["notion"],
+        github=github,
+        github_user_ids=settings.github_owner_ids,
     )
 
     # El orden importa: chat va ÚLTIMO porque atrapa cualquier mensaje de texto restante

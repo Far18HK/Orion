@@ -25,6 +25,8 @@ class Settings:
     timezone: str | None  # Zona por defecto de los recordatorios (cada chat puede cambiarla con /zona)
     rate_limit_messages: int  # Mensajes máximos por usuario en la ventana (0 = sin límite)
     rate_limit_window: int  # Segundos de la ventana
+    github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
+    github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
 
 
@@ -99,6 +101,14 @@ def load_settings() -> Settings:
                 f"TIMEZONE «{timezone}» no es válida. Usa un nombre como America/Lima"
             ) from None
 
+    github_token = os.getenv("GITHUB_TOKEN") or None
+    try:
+        github_owner_ids = frozenset(
+            int(x) for x in os.getenv("GITHUB_OWNER_IDS", "").replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError("GITHUB_OWNER_IDS debe ser una lista de números: 123456,789012") from None
+
     db_path = resolve_db_path(os.environ)
     check_db_dir(db_path)
 
@@ -112,5 +122,7 @@ def load_settings() -> Settings:
         timezone=timezone,
         rate_limit_messages=rate_limit_messages,
         rate_limit_window=rate_limit_window,
+        github_token=github_token,
+        github_owner_ids=github_owner_ids,
         db_path=db_path,
     )
