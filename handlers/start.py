@@ -13,9 +13,14 @@ async def cmd_start(message: Message) -> None:
     nombre = message.from_user.first_name if message.from_user else "amigo"
     await message.answer(
         f"¡Hola, {nombre}! 👋\n\n"
-        "Soy tu asistente personal con IA. Pregúntame lo que quieras: "
-        "dudas, ideas, textos, código, recetas...\n\n"
-        "Recuerdo nuestra conversación reciente. Si quieres empezar de cero, usa /reset 🧹"
+        "Soy tu asistente personal con IA. Pregúntame lo que quieras —incluyendo cosas "
+        "actuales, puedo buscar en internet solo cuando lo necesite— o mándame fotos y "
+        "notas de voz y te las comento.\n\n"
+        "Comandos disponibles:\n"
+        "/recordar <tiempo> <texto> — ej. /recordar 30m Tomar agua\n"
+        "/nota <texto> — guarda una nota en Notion\n"
+        "/reset — borra la memoria de esta conversación\n\n"
+        "Recuerdo nuestra conversación reciente mientras hablamos 🧠"
     )
 
 
