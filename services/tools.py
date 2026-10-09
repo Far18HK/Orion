@@ -1,58 +1,70 @@
-"""Herramientas que el modelo puede llamar solo: búsqueda web y clima (sin API keys)."""
+"""Herramientas del agente: el modelo decide solo cuál usar (function calling).
+
+Para añadir una herramienta nueva: escribe un handler `async def _mi_tool(ctx, args) -> str`
+y agrégalo a TOOLS con su descripción. Nada más: el agente la verá en la siguiente respuesta.
+"""
+import ast
 import asyncio
+import html
+import ipaddress
 import json
 import logging
+import math
+import operator
+import re
+import socket
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from urllib.parse import urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from ddgs import DDGS
+
+from services.notion import NotionError, NotionService
+from services.reminders import ReminderError, ReminderService
+from services.schedule_parser import find_timezones, format_when
 
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 MAX_RESULTS = 5
 MAX_SNIPPET = 300
+MAX_TOOL_RESULT = 6000  # Tope de caracteres que le devolvemos al modelo por herramienta
+MAX_PAGE_BYTES = 1_000_000
+MAX_REDIRECTS = 3
 
-# Descripción de las herramientas en el formato de function calling de Groq/OpenAI
-TOOL_SPECS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": (
-                "Busca en internet información actual o que no conoces: noticias, precios, "
-                "resultados deportivos, datos recientes, lanzamientos, etc."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Consulta de búsqueda, corta y específica."},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["web", "news"],
-                        "description": "'news' para noticias recientes, 'web' para lo demás.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Obtiene el clima actual y el pronóstico de 3 días de una ciudad.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "Ciudad, p. ej. 'Lima' o 'Madrid, España'."},
-                },
-                "required": ["city"],
-            },
-        },
-    },
+DAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MONTHS_ES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+    "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 ]
 
-# Códigos WMO que devuelve Open-Meteo
+
+@dataclass(frozen=True)
+class ToolContext:
+    """Quién está hablando y a qué servicios puede llegar el agente en este turno."""
+
+    chat_id: int
+    user_id: int
+    reminders: ReminderService | None = None
+    notion: NotionService | None = None
+
+
+def format_now(now: datetime) -> str:
+    """'jueves 8 de octubre de 2026, 23:51' (sin depender del locale del servidor)."""
+    return f"{DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month - 1]} de {now.year}, {now:%H:%M}"
+
+
+def user_now(ctx: ToolContext) -> tuple[datetime, bool]:
+    """Hora actual en la zona del chat. El bool dice si la zona es conocida (si no, UTC)."""
+    tz = ctx.reminders.get_timezone(ctx.chat_id) if ctx.reminders else None
+    return datetime.now(tz or timezone.utc), tz is not None
+
+
+# ---------------------------------------------------------------- búsqueda y clima
+
 WEATHER_CODES = {
     0: "despejado", 1: "mayormente despejado", 2: "parcialmente nublado", 3: "nublado",
     45: "niebla", 48: "niebla con escarcha",
@@ -88,9 +100,7 @@ async def web_search(query: str, kind: str = "web") -> str:
         title = r.get("title", "")
         url = r.get("href") or r.get("url", "")
         body = (r.get("body") or "")[:MAX_SNIPPET]
-        date = r.get("date", "")
-        source = r.get("source", "")
-        extra = " | ".join(x for x in (source, date) if x)
+        extra = " | ".join(x for x in (r.get("source", ""), r.get("date", "")) if x)
         lines.append(f"{i}. {title}" + (f" ({extra})" if extra else "") + f"\n   {body}\n   {url}")
     return "\n".join(lines)
 
@@ -149,19 +159,410 @@ async def get_weather(city: str) -> str:
     return "\n".join(out)
 
 
-async def run_tool(name: str, arguments: str) -> str:
+async def _t_web_search(ctx: ToolContext, args: dict) -> str:
+    return await web_search(str(args.get("query", "")), str(args.get("kind", "web")))
+
+
+async def _t_get_weather(ctx: ToolContext, args: dict) -> str:
+    return await get_weather(str(args.get("city", "")))
+
+
+# ---------------------------------------------------------------- leer páginas web
+
+def _check_public_url(url: str) -> None:
+    """Rechaza URLs que no sean http(s) o que apunten a redes internas (SSRF).
+
+    Ojo: es una validación previa a conectar; no cubre DNS rebinding, pero el bot
+    no maneja secretos accesibles por HTTP interno más allá de esto.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Solo puedo abrir enlaces http(s).")
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise ValueError("No pude resolver ese dominio.") from None
+    for info in infos:
+        if not ipaddress.ip_address(info[4][0]).is_global:
+            raise ValueError("Ese enlace apunta a una red privada; no lo abro.")
+
+
+def _html_to_text(raw: str) -> str:
+    raw = re.sub(r"(?is)<(script|style|noscript|svg|head)\b.*?</\1>", " ", raw)
+    raw = re.sub(r"(?s)<!--.*?-->", " ", raw)
+    raw = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|br)>|<br\s*/?>", "\n", raw)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+async def _t_read_webpage(ctx: ToolContext, args: dict) -> str:
+    url = str(args.get("url", "")).strip()
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AsistenteBot/1.0)"}
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT, headers=headers) as session:
+        for _ in range(MAX_REDIRECTS + 1):
+            try:
+                await asyncio.to_thread(_check_public_url, url)
+            except ValueError as e:
+                return f"Error: {e}"
+            async with session.get(url, allow_redirects=False) as resp:
+                if resp.status in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
+                    url = urljoin(url, resp.headers["Location"])
+                    continue
+                if resp.status >= 400:
+                    return f"Error: la página respondió con código {resp.status}."
+                kind = resp.headers.get("Content-Type", "")
+                if not any(k in kind for k in ("html", "text", "json", "xml")):
+                    return f"Error: no puedo leer contenido de tipo «{kind or 'desconocido'}»."
+                body = await resp.content.read(MAX_PAGE_BYTES)
+                charset = resp.charset or "utf-8"
+                break
+        else:
+            return "Error: demasiadas redirecciones."
+
+    raw = body.decode(charset, errors="replace")
+    text = _html_to_text(raw) if "html" in kind else raw
+    if not text.strip():
+        return "La página no tiene texto legible."
+    return f"Contenido de {url}:\n{text[:MAX_TOOL_RESULT - 200]}"
+
+
+# ---------------------------------------------------------------- hora y cálculo
+
+async def _t_get_current_time(ctx: ToolContext, args: dict) -> str:
+    place = str(args.get("timezone", "")).strip()
+    if place:
+        matches = find_timezones(place)
+        if not matches:
+            return f"Error: no conozco la zona «{place}»."
+        if len(matches) > 1:
+            return "Hay varias zonas posibles, elige una: " + ", ".join(matches[:8])
+        now, note = datetime.now(ZoneInfo(matches[0])), matches[0]
+    else:
+        now, known = user_now(ctx)
+        note = now.tzinfo.key if known else "UTC (el usuario aún no configura su zona horaria)"  # type: ignore[union-attr]
+    return f"{format_now(now)} ({note})"
+
+
+_BIN_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_FUNCS = {
+    "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "log": math.log, "log10": math.log10, "abs": abs, "round": round, "min": min, "max": max,
+}
+_CONSTS = {"pi": math.pi, "e": math.e}
+
+
+def _eval_node(node: ast.AST):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in _CONSTS:
+        return _CONSTS[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _eval_node(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _eval_node(node.left), _eval_node(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+            raise ValueError("Exponente demasiado grande.")
+        return _BIN_OPS[type(node.op)](left, right)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _FUNCS
+        and not node.keywords
+    ):
+        return _FUNCS[node.func.id](*(_eval_node(a) for a in node.args))
+    raise ValueError("Expresión no permitida.")
+
+
+async def _t_calculate(ctx: ToolContext, args: dict) -> str:
+    expr = str(args.get("expression", "")).strip().replace("^", "**")
+    if not expr:
+        return "Error: la expresión está vacía."
+    try:
+        result = _eval_node(ast.parse(expr, mode="eval").body)
+    except ZeroDivisionError:
+        return "Error: división entre cero."
+    except (ValueError, SyntaxError, TypeError, OverflowError) as e:
+        return f"Error: no pude calcular eso ({e})."
+    if isinstance(result, float):
+        result = round(result, 10)
+    return f"{expr} = {result}"
+
+
+# ---------------------------------------------------------------- recordatorios y zona
+
+async def _t_create_reminder(ctx: ToolContext, args: dict) -> str:
+    when = str(args.get("when", "")).strip()
+    message = str(args.get("message", "")).strip()
+    if not when or not message:
+        return "Error: faltan 'when' y/o 'message'."
+    try:
+        text, description = ctx.reminders.create(ctx.chat_id, f"{when} {message}")
+    except ReminderError as e:
+        return f"Error: {e}"
+    return f"Recordatorio creado: «{text}» {description}."
+
+
+async def _t_list_reminders(ctx: ToolContext, args: dict) -> str:
+    items = ctx.reminders.list_jobs(ctx.chat_id)
+    if not items:
+        return "No hay recordatorios pendientes."
+    tz = ctx.reminders.get_timezone(ctx.chat_id) or timezone.utc
+    lines = []
+    for item in items:
+        when = format_when(item.next_run, tz) if item.next_run else "pausado"
+        kind = f"repetido ({item.description})" if item.recurring else "una vez"
+        lines.append(f"- id={item.id} | «{item.text}» | {kind} | próximo: {when}")
+    return "\n".join(lines)
+
+
+async def _t_cancel_reminder(ctx: ToolContext, args: dict) -> str:
+    info = ctx.reminders.cancel(ctx.chat_id, str(args.get("id", "")).strip())
+    if info is None:
+        return "Error: no existe un recordatorio con ese id (usa list_reminders para ver los ids)."
+    return f"Recordatorio cancelado: «{info.text}»."
+
+
+async def _t_set_timezone(ctx: ToolContext, args: dict) -> str:
+    place = str(args.get("place", "")).strip()
+    matches = find_timezones(place)
+    if not matches:
+        return f"Error: no encontré la zona «{place}». Pide al usuario su ciudad o una zona como America/Lima."
+    if len(matches) > 1:
+        return "Hay varias coincidencias, pregunta al usuario cuál es: " + ", ".join(matches[:8])
+    tz = ctx.reminders.set_timezone(ctx.chat_id, matches[0])
+    return f"Zona horaria guardada: {tz.key} (ahora son las {datetime.now(tz):%H:%M})."
+
+
+# ---------------------------------------------------------------- notas (Notion)
+
+def _format_notes(notes) -> str:
+    if not notes:
+        return "No hay notas."
+    lines = []
+    for note in notes:
+        tags = " ".join(f"#{t}" for t in note.tags)
+        meta = " · ".join(x for x in (note.created, tags) if x)
+        lines.append(f"- {note.title}" + (f" ({meta})" if meta else "") + f" {note.url}")
+    return "\n".join(lines)
+
+
+async def _t_save_note(ctx: ToolContext, args: dict) -> str:
+    text = str(args.get("text", "")).strip()
+    if not text:
+        return "Error: la nota está vacía."
+    tags = [str(t).lstrip("#") for t in (args.get("tags") or []) if str(t).strip()][:5]
+    try:
+        url = await ctx.notion.add_note(text, tags)
+    except NotionError as e:
+        return f"Error: {e}"
+    return f"Nota guardada en Notion: {url}"
+
+
+async def _t_list_notes(ctx: ToolContext, args: dict) -> str:
+    try:
+        limit = min(max(int(args.get("limit", 5)), 1), 10)
+        return _format_notes(await ctx.notion.recent(limit))
+    except (NotionError, ValueError) as e:
+        return f"Error: {e}"
+
+
+async def _t_search_notes(ctx: ToolContext, args: dict) -> str:
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "Error: falta qué buscar."
+    try:
+        return _format_notes(await ctx.notion.search(query))
+    except NotionError as e:
+        return f"Error: {e}"
+
+
+# ---------------------------------------------------------------- registro
+
+Handler = Callable[[ToolContext, dict], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class Tool:
+    name: str
+    description: str
+    properties: dict
+    required: tuple[str, ...]
+    handler: Handler
+    needs: str | None = None  # "reminders" | "notion": solo se ofrece si ese servicio existe
+
+    def spec(self) -> dict:
+        """Formato de function calling de Groq/OpenAI."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": self.properties,
+                    "required": list(self.required),
+                },
+            },
+        }
+
+
+def _str(description: str, **extra) -> dict:
+    return {"type": "string", "description": description, **extra}
+
+
+TOOLS: list[Tool] = [
+    Tool(
+        "web_search",
+        "Busca en internet información actual o que no conoces: noticias, precios, "
+        "resultados deportivos, datos recientes, lanzamientos, etc.",
+        {
+            "query": _str("Consulta de búsqueda, corta y específica."),
+            "kind": _str("'news' para noticias recientes, 'web' para lo demás.", enum=["web", "news"]),
+        },
+        ("query",),
+        _t_web_search,
+    ),
+    Tool(
+        "read_webpage",
+        "Abre un enlace y devuelve su texto. Úsala cuando el usuario te pase una URL, o para "
+        "leer a fondo un resultado de web_search cuando el resumen no alcance.",
+        {"url": _str("URL completa, con http:// o https://.")},
+        ("url",),
+        _t_read_webpage,
+    ),
+    Tool(
+        "get_weather",
+        "Obtiene el clima actual y el pronóstico de 3 días de una ciudad.",
+        {"city": _str("Ciudad, p. ej. 'Lima' o 'Madrid, España'.")},
+        ("city",),
+        _t_get_weather,
+    ),
+    Tool(
+        "get_current_time",
+        "Devuelve fecha y hora exactas. Sin argumentos usa la zona horaria del usuario; "
+        "con 'timezone' da la hora de otra ciudad o zona.",
+        {"timezone": _str("Opcional: ciudad o zona IANA, p. ej. 'Tokio' o 'Europe/Madrid'.")},
+        (),
+        _t_get_current_time,
+    ),
+    Tool(
+        "calculate",
+        "Calculadora exacta. Úsala para cualquier cuenta que no sea trivial en vez de calcular "
+        "de cabeza. Soporta + - * / // % ^, paréntesis, sqrt, sin, cos, tan, log, log10, abs, "
+        "round, min, max, pi y e.",
+        {"expression": _str("Expresión matemática, p. ej. '(1200*1.16)/12'.")},
+        ("expression",),
+        _t_calculate,
+    ),
+    Tool(
+        "create_reminder",
+        "Programa un recordatorio que el bot enviará por este chat a su hora. Úsala cuando "
+        "el usuario pida que le avises o recuerdes algo.",
+        {
+            "when": _str(
+                "Cuándo, en uno de estos formatos EXACTOS: relativo '30m', '2h', '1d', '1h30m'; "
+                "hora '18:30'; fecha+hora 'mañana 8:00', 'pasado mañana 8:00', 'lunes 9:00', "
+                "'25/12 10:00'; repetido 'cada día 8:00', 'cada lunes 9:00', 'cada 2h' "
+                "(mínimo cada 5m). Traduce lo que diga el usuario a este formato; la hora va en "
+                "24h o con am/pm y es hora local del usuario."
+            ),
+            "message": _str("Qué recordarle, redactado como el texto que verá el usuario."),
+        },
+        ("when", "message"),
+        _t_create_reminder,
+        needs="reminders",
+    ),
+    Tool(
+        "list_reminders",
+        "Lista los recordatorios pendientes de este chat con su id.",
+        {},
+        (),
+        _t_list_reminders,
+        needs="reminders",
+    ),
+    Tool(
+        "cancel_reminder",
+        "Cancela un recordatorio por su id. Si no sabes el id, llama antes a list_reminders.",
+        {"id": _str("Id exacto devuelto por list_reminders.")},
+        ("id",),
+        _t_cancel_reminder,
+        needs="reminders",
+    ),
+    Tool(
+        "set_timezone",
+        "Guarda la zona horaria del usuario. Úsala cuando la diga o cuando create_reminder "
+        "falle por no tenerla (pregúntale su ciudad primero).",
+        {"place": _str("Ciudad o zona IANA, p. ej. 'Lima' o 'America/Mexico_City'.")},
+        ("place",),
+        _t_set_timezone,
+        needs="reminders",
+    ),
+    Tool(
+        "save_note",
+        "Guarda una nota en la base de Notion del usuario. Úsala cuando pida anotar, guardar "
+        "o apuntar algo para después.",
+        {
+            "text": _str("Texto de la nota."),
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Etiquetas opcionales sin '#', máximo 5.",
+            },
+        },
+        ("text",),
+        _t_save_note,
+        needs="notion",
+    ),
+    Tool(
+        "list_notes",
+        "Muestra las últimas notas guardadas en Notion.",
+        {"limit": {"type": "integer", "description": "Cuántas (1-10, por defecto 5)."}},
+        (),
+        _t_list_notes,
+        needs="notion",
+    ),
+    Tool(
+        "search_notes",
+        "Busca notas de Notion por texto en el título, o por etiqueta si empieza con '#'.",
+        {"query": _str("Texto a buscar, o '#etiqueta'.")},
+        ("query",),
+        _t_search_notes,
+        needs="notion",
+    ),
+]
+_BY_NAME = {t.name: t for t in TOOLS}
+
+
+def _available(tool: Tool, ctx: ToolContext) -> bool:
+    return tool.needs is None or getattr(ctx, tool.needs) is not None
+
+
+def build_tool_specs(ctx: ToolContext) -> list[dict]:
+    """Solo las herramientas que este bot tiene configuradas (p. ej. sin Notion no hay notas)."""
+    return [t.spec() for t in TOOLS if _available(t, ctx)]
+
+
+async def run_tool(name: str, arguments: str, ctx: ToolContext) -> str:
     """Ejecuta la herramienta pedida por el modelo. Nunca lanza: devuelve el error como texto."""
+    tool = _BY_NAME.get(name)
+    if tool is None or not _available(tool, ctx):
+        return f"Error: herramienta desconocida «{name}»."
     try:
         args = json.loads(arguments or "{}")
-    except json.JSONDecodeError:
+        if not isinstance(args, dict):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
         return "Error: argumentos inválidos."
 
     try:
-        if name == "web_search":
-            return await web_search(str(args.get("query", "")), str(args.get("kind", "web")))
-        if name == "get_weather":
-            return await get_weather(str(args.get("city", "")))
-        return f"Error: herramienta desconocida «{name}»."
+        result = await tool.handler(ctx, args)
     except Exception as e:  # noqa: BLE001 - el modelo debe poder explicarle el fallo al usuario
         logger.error("Falló la herramienta %s: %s", name, e)
         return "Error: la herramienta no pudo completar la consulta ahora mismo."
+    return result[:MAX_TOOL_RESULT]
