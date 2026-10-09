@@ -1,10 +1,17 @@
 """Configuración del bot: lee las variables de entorno desde .env."""
+import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 load_dotenv()  # Carga el archivo .env
+
+logger = logging.getLogger(__name__)
+
+DB_FILENAME = "reminders.db"
 
 
 @dataclass(frozen=True)
@@ -15,8 +22,51 @@ class Settings:
     max_history: int  # Cantidad de mensajes que recuerda (pregunta + respuesta cuentan por separado)
     notion_token: str | None
     notion_database_id: str | None
+    timezone: str | None  # Zona por defecto de los recordatorios (cada chat puede cambiarla con /zona)
     rate_limit_messages: int  # Mensajes máximos por usuario en la ventana (0 = sin límite)
     rate_limit_window: int  # Segundos de la ventana
+    db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
+
+
+def resolve_db_path(env: Mapping[str, str]) -> str:
+    """Decide dónde vive la base de datos SQLite.
+
+    1. DB_PATH, si lo defines tú.
+    2. Si hay un Volume de Railway adjunto, dentro de él (Railway pone RAILWAY_VOLUME_MOUNT_PATH solo).
+    3. Si no, en la carpeta del proyecto: sirve en tu PC, pero en Railway se borra en cada deploy.
+    """
+    explicit = env.get("DB_PATH") or None
+    mount = env.get("RAILWAY_VOLUME_MOUNT_PATH") or None
+
+    if explicit:
+        return explicit
+    if mount:
+        return os.path.join(mount, DB_FILENAME)
+    if env.get("RAILWAY_ENVIRONMENT_NAME"):
+        logger.warning(
+            "Estás en Railway sin Volume: los recordatorios y zonas horarias se borrarán "
+            "en cada deploy. Adjunta un Volume al servicio (o define DB_PATH)."
+        )
+    return DB_FILENAME
+
+
+def check_db_dir(path: str) -> None:
+    """Falla al arrancar si la carpeta de la base de datos no existe o no se puede escribir.
+
+    No la creamos a propósito: si el Volume no está montado, crearla escribiría en el disco
+    efímero y perderías los datos sin enterarte.
+    """
+    folder = os.path.dirname(path)
+    if folder and not os.path.isdir(folder):
+        raise RuntimeError(
+            f"La carpeta «{folder}» de la base de datos no existe. "
+            "¿Montaste el Volume en esa ruta? Revisa DB_PATH y el mount path del Volume."
+        )
+    if not os.access(folder or ".", os.W_OK):
+        raise RuntimeError(
+            f"No tengo permiso de escritura en «{folder or '.'}». "
+            "Si usas una imagen con usuario no root en Railway, revisa los permisos del Volume."
+        )
 
 
 def load_settings() -> Settings:
@@ -40,6 +90,18 @@ def load_settings() -> Settings:
     rate_limit_messages = max(int(os.getenv("RATE_LIMIT_MESSAGES", "10")), 0)
     rate_limit_window = max(int(os.getenv("RATE_LIMIT_WINDOW", "60")), 1)
 
+    timezone = os.getenv("TIMEZONE") or None
+    if timezone:
+        try:
+            ZoneInfo(timezone)
+        except Exception:
+            raise RuntimeError(
+                f"TIMEZONE «{timezone}» no es válida. Usa un nombre como America/Lima"
+            ) from None
+
+    db_path = resolve_db_path(os.environ)
+    check_db_dir(db_path)
+
     return Settings(
         telegram_token=token,
         groq_api_key=api_key,
@@ -47,6 +109,8 @@ def load_settings() -> Settings:
         max_history=max(max_history, 2),
         notion_token=notion_token,
         notion_database_id=notion_database_id,
+        timezone=timezone,
         rate_limit_messages=rate_limit_messages,
         rate_limit_window=rate_limit_window,
+        db_path=db_path,
     )

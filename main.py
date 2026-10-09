@@ -36,7 +36,12 @@ async def main() -> None:
         max_history=settings.max_history,
     )
 
-    reminder_service = ReminderService(token=settings.telegram_token)
+    logging.info("Base de datos de recordatorios: %s", settings.db_path)
+    reminder_service = ReminderService(
+        token=settings.telegram_token,
+        db_path=settings.db_path,
+        default_timezone=settings.timezone,
+    )
     reminder_service.start()
     dp["reminders"] = reminder_service
 
