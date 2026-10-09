@@ -379,7 +379,9 @@ def _format_notes(notes) -> str:
     for note in notes:
         tags = " ".join(f"#{t}" for t in note.tags)
         meta = " · ".join(x for x in (note.created, tags) if x)
-        lines.append(f"- {note.title}" + (f" ({meta})" if meta else "") + f" {note.url}")
+        lines.append(
+            f"- {note.title}" + (f" ({meta})" if meta else "") + f" {note.url} [id:{note.id}]"
+        )
     return "\n".join(lines)
 
 
@@ -411,6 +413,56 @@ async def _t_search_notes(ctx: ToolContext, args: dict) -> str:
         return _format_notes(await ctx.notion.search(query))
     except NotionError as e:
         return f"Error: {e}"
+
+
+async def _t_delete_notes(ctx: ToolContext, args: dict) -> str:
+    try:
+        if args.get("all"):
+            if args.get("confirmed") is not True:
+                return (
+                    "Error: borrar TODAS las notas requiere confirmación. Pregunta al usuario "
+                    "«¿Seguro que quieres borrar todas tus notas?» y, solo si responde que sí, "
+                    "vuelve a llamar con all=true y confirmed=true."
+                )
+            ids = [n.id for n in await ctx.notion.all_notes()]
+        else:
+            ids = [str(i) for i in (args.get("note_ids") or []) if str(i).strip()][:50]
+        if not ids:
+            return "Error: no hay notas que borrar (o falta note_ids)."
+        n = await ctx.notion.delete_notes(ids)
+    except NotionError as e:
+        return f"Error: {e}"
+    return f"{n} nota(s) enviadas a la papelera de Notion (recuperables unos 30 días)."
+
+
+async def _t_edit_note(ctx: ToolContext, args: dict) -> str:
+    note_id = str(args.get("note_id", "")).strip()
+    if not note_id:
+        return "Error: falta note_id (búscala antes con list_notes o search_notes)."
+    clean = lambda xs: [str(t).lstrip("#") for t in (xs or []) if str(t).strip()]  # noqa: E731
+    try:
+        note = await ctx.notion.edit_note(
+            note_id,
+            text=str(args.get("text") or "").strip() or None,
+            add_tags=clean(args.get("add_tags")),
+            remove_tags=clean(args.get("remove_tags")),
+        )
+    except NotionError as e:
+        return f"Error: {e}"
+    return "Nota actualizada:\n" + _format_notes([note])
+
+
+async def _t_count_notes(ctx: ToolContext, args: dict) -> str:
+    try:
+        notes = await ctx.notion.all_notes()
+    except NotionError as e:
+        return f"Error: {e}"
+    tags: dict[str, int] = {}
+    for n in notes:
+        for tag in n.tags:
+            tags[tag] = tags.get(tag, 0) + 1
+    summary = ", ".join(f"#{k} ({v})" for k, v in sorted(tags.items(), key=lambda kv: -kv[1]))
+    return f"Hay {len(notes)} nota(s)." + (f" Etiquetas: {summary}." if summary else "")
 
 
 # ---------------------------------------------------------------- GitHub (solo lectura)
@@ -604,6 +656,58 @@ TOOLS: list[Tool] = [
         {"query": _str("Texto a buscar, o '#etiqueta'.")},
         ("query",),
         _t_search_notes,
+        needs="notion",
+    ),
+    Tool(
+        "delete_notes",
+        "Borra notas de Notion (van a la papelera, recuperables ~30 días). Para notas concretas "
+        "busca antes sus ids con list_notes/search_notes y pásalos en note_ids. Para «borra todas» "
+        "usa all=true, pero PRIMERO pide confirmación al usuario y solo con su «sí» envía "
+        "confirmed=true. Nunca muestres los ids al usuario.",
+        {
+            "note_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ids de las notas a borrar (los [id:...] de las listas).",
+            },
+            "all": {"type": "boolean", "description": "Borrar todas las notas."},
+            "confirmed": {
+                "type": "boolean",
+                "description": "true solo si el usuario ya confirmó borrar todas.",
+            },
+        },
+        (),
+        _t_delete_notes,
+        needs="notion",
+    ),
+    Tool(
+        "edit_note",
+        "Edita una nota existente: cambia su texto/título y/o añade o quita etiquetas. "
+        "Obtén antes el id con list_notes o search_notes. No muestres el id al usuario.",
+        {
+            "note_id": _str("Id de la nota (el [id:...] de las listas)."),
+            "text": _str("Nuevo texto de la nota (reemplaza el título). Opcional."),
+            "add_tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Etiquetas a añadir, sin '#'.",
+            },
+            "remove_tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Etiquetas a quitar, sin '#'.",
+            },
+        },
+        ("note_id",),
+        _t_edit_note,
+        needs="notion",
+    ),
+    Tool(
+        "count_notes",
+        "Cuenta cuántas notas hay en Notion y cuántas por etiqueta.",
+        {},
+        (),
+        _t_count_notes,
         needs="notion",
     ),
     Tool(
