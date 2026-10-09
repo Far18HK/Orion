@@ -45,8 +45,10 @@ class _Schema:
 
 class NotionService:
     def __init__(self, token: str, database_id: str) -> None:
-        self.client = AsyncClient(auth=token)
+        # 2025-09-03: las columnas viven en el "data source", no en la base
+        self.client = AsyncClient(auth=token, notion_version="2025-09-03")
         self.database_id = database_id
+        self._data_source_id: str | None = None
         self._schema: _Schema | None = None
 
     async def _get_schema(self) -> _Schema:
@@ -61,7 +63,24 @@ class NotionService:
                 "y que la base esté compartida con tu integración."
             ) from e
 
-        props = db.get("properties", {})
+        props = db.get("properties") or {}
+        if not props:
+            # API nueva: GET /databases solo trae la lista de data sources;
+            # el esquema (propiedades) se pide al data source.
+            sources = db.get("data_sources") or []
+            if not sources:
+                raise NotionError(
+                    "Tu base de Notion no devolvió columnas ni data sources 😕 "
+                    "revisa que esté compartida con la integración."
+                )
+            self._data_source_id = sources[0]["id"]
+            try:
+                ds = await self.client.request(
+                    path=f"data_sources/{self._data_source_id}", method="GET"
+                )
+            except Exception as e:
+                raise NotionError("No pude leer las columnas de tu base de Notion 😕") from e
+            props = ds.get("properties") or {}
         logger.info("Notion props: %s", {k: v.get("type") for k, v in props.items()})
 
         def first(kind: str) -> str | None:
@@ -112,9 +131,12 @@ class NotionService:
             ]
 
         try:
-            page = await self.client.pages.create(
-                parent={"database_id": self.database_id}, properties=properties, **kwargs
+            parent = (
+                {"type": "data_source_id", "data_source_id": self._data_source_id}
+                if self._data_source_id
+                else {"database_id": self.database_id}
             )
+            page = await self.client.pages.create(parent=parent, properties=properties, **kwargs)
         except Exception as e:
             # Extraemos el mensaje real de Notion para diagnosticar el problema
             detail = getattr(e, "body", None) or getattr(e, "message", None) or str(e)
@@ -142,14 +164,18 @@ class NotionService:
     async def _query(self, limit: int, flt: dict | None = None) -> list[Note]:
         schema = await self._get_schema()
         kwargs: dict = {
-            "database_id": self.database_id,
             "page_size": limit,
             "sorts": [{"timestamp": "created_time", "direction": "descending"}],
         }
         if flt:
             kwargs["filter"] = flt
         try:
-            data = await self.client.databases.query(**kwargs)
+            if self._data_source_id:
+                data = await self.client.request(
+                    path=f"data_sources/{self._data_source_id}/query", method="POST", body=kwargs
+                )
+            else:
+                data = await self.client.databases.query(database_id=self.database_id, **kwargs)
         except Exception as e:
             raise NotionError("No pude consultar tus notas en Notion 😕 inténtalo de nuevo.") from e
         return [self._to_note(page, schema) for page in data.get("results", [])]
