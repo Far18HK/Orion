@@ -873,6 +873,6 @@ async def run_tool(name: str, arguments: str, ctx: ToolContext) -> str:
     try:
         result = await tool.handler(ctx, args)
     except Exception as e:  # noqa: BLE001 - el modelo debe poder explicarle el fallo al usuario
-        logger.error("Falló la herramienta %s: %s", name, e)
+        logger.error("Falló la herramienta %s: %s", name, e, exc_info=True)
         return "Error: la herramienta no pudo completar la consulta ahora mismo."
     return result[:MAX_TOOL_RESULT]

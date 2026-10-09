@@ -106,11 +106,11 @@ class GroqService:
         self.discord_token = discord_token
         self.discord_dm_ids = discord_dm_ids
         # Historial por usuario: deque descarta solo los mensajes más viejos
-        self._history: dict[int, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
+        self._history: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
         # Documento cargado por usuario: (nombre, texto). Uno a la vez
-        self._documents: dict[int, tuple[str, str]] = {}
+        self._documents: dict[str, tuple[str, str]] = {}
         # Modelo elegido con /modelo por usuario (si no hay, se usa el predeterminado)
-        self._models: dict[int, str] = {}
+        self._models: dict[str, str] = {}
         self._models_cache: tuple[float, list[str]] | None = None
 
     @property
@@ -137,23 +137,30 @@ class GroqService:
         text = str(e)
         return "tokens per day" in text or "(TPD)" in text
 
-    def reset(self, user_id: int) -> None:
-        """Borra la memoria de un usuario (conversación y documento)."""
-        self._history.pop(user_id, None)
-        self._documents.pop(user_id, None)
+    @staticmethod
+    def _key(user_id: int, platform: str = "telegram") -> str:
+        """Evita mezclar conversaciones o permisos entre Telegram y Discord."""
+        return f"{platform}:{user_id}"
 
-    def clear_document(self, user_id: int) -> bool:
-        """Olvida el documento cargado. Devuelve True si había uno."""
-        return self._documents.pop(user_id, None) is not None
+    def reset(self, user_id: int, platform: str = "telegram") -> None:
+        """Borra la memoria de un usuario y plataforma."""
+        key = self._key(user_id, platform)
+        self._history.pop(key, None)
+        self._documents.pop(key, None)
+        self._models.pop(key, None)
 
-    def get_model(self, user_id: int) -> str:
-        return self._models.get(user_id, self.model)
+    def clear_document(self, user_id: int, platform: str = "telegram") -> bool:
+        """Olvida el documento cargado."""
+        return self._documents.pop(self._key(user_id, platform), None) is not None
 
-    def set_model(self, user_id: int, model: str) -> None:
-        self._models[user_id] = model
+    def get_model(self, user_id: int, platform: str = "telegram") -> str:
+        return self._models.get(self._key(user_id, platform), self.model)
 
-    def clear_model(self, user_id: int) -> None:
-        self._models.pop(user_id, None)
+    def set_model(self, user_id: int, model: str, platform: str = "telegram") -> None:
+        self._models[self._key(user_id, platform)] = model
+
+    def clear_model(self, user_id: int, platform: str = "telegram") -> None:
+        self._models.pop(self._key(user_id, platform), None)
 
     async def list_models(self) -> list[str]:
         """Ids de los modelos activos en Groq (con caché para no consultar cada vez)."""
@@ -312,24 +319,25 @@ class GroqService:
         `saved_as` es lo que se guarda en el historial en lugar de `text` (p. ej. para
         no repetir una pregunta larga sobre un documento).
         """
+        key = self._key(user_id, platform)
         ctx = ToolContext(
             chat_id=chat_id if chat_id is not None else user_id,
             user_id=user_id,
             reminders=self.reminders,
             notion=self.notion,
-            github=self.github if user_id in self.github_user_ids else None,
+            # GitHub privado solo se habilita para ids de Telegram explícitamente autorizados.
+            github=self.github if platform == "telegram" and user_id in self.github_user_ids else None,
             platform=platform,
             discord_token=(
                 self.discord_token
-                if self.discord_dm_ids
-                and (user_id in self.github_user_ids or user_id in self.discord_dm_ids)
+                if platform == "discord" and user_id in self.discord_dm_ids
                 else None
             ),
             discord_dm_ids=self.discord_dm_ids,
         )
         specs = build_tool_specs(ctx)
-        messages = [*self._context_messages(user_id, ctx), {"role": "user", "content": text}]
-        model = self.get_model(user_id)
+        messages = [*self._context_messages(key, ctx), {"role": "user", "content": text}]
+        model = self.get_model(user_id, platform)
 
         try:
             # En la última vuelta no se ofrecen herramientas: obliga al modelo a responder
@@ -370,7 +378,7 @@ class GroqService:
             raise GroqError("No pude generar respuesta para eso 🤔 ¿Lo intentas de otra forma?")
 
         # Solo guardamos la pregunta y la respuesta final, no las idas y vueltas con herramientas
-        history = self._history[user_id]
+        history = self._history[key]
         history.append({"role": "user", "content": saved_as or text})
         history.append({"role": "assistant", "content": answer})
         return answer
@@ -382,31 +390,34 @@ class GroqService:
         text: str,
         question: str,
         chat_id: int | None = None,
+        platform: str = "telegram",
     ) -> str:
         """Carga un documento como contexto y responde la pregunta sobre él."""
-        previous = self._documents.get(user_id)
-        self._documents[user_id] = (filename, text)
+        key = self._key(user_id, platform)
+        previous = self._documents.get(key)
+        self._documents[key] = (filename, text)
         try:
             return await self.ask(
                 user_id,
                 question,
                 saved_as=f"[Documento enviado: {filename}] {question}",
                 chat_id=chat_id,
+                platform=platform,
             )
         except GroqError:
-            # Si falló, no dejamos cargado un documento que el usuario no llegó a ver procesado
             if previous:
-                self._documents[user_id] = previous
+                self._documents[key] = previous
             else:
-                self._documents.pop(user_id, None)
+                self._documents.pop(key, None)
             raise
 
     async def ask_with_image(self, user_id: int, image_bytes: bytes, prompt: str) -> str:
-        """Envía una imagen (+ un prompt) a Groq usando un modelo con visión."""
+        """Envía una imagen (+ un prompt) a Groq usando visión, con reintento y rotación."""
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:image/jpeg;base64,{b64}"
 
-        history = self._history[user_id]
+        key = self._key(user_id)
+        history = self._history[key]
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             *history,
@@ -419,12 +430,28 @@ class GroqService:
             },
         ]
 
-        try:
-            response = await self.client.chat.completions.create(
-                model=VISION_MODEL, messages=messages, temperature=0.8
-            )
-        except Exception as e:
-            raise self._handle_error(e) from e
+        self._reset_active_client_if_new_day()
+        response = None
+        for attempt in range(3 + len(self._clients) - 1):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=VISION_MODEL, messages=messages, temperature=0.8
+                )
+                break
+            except Exception as e:
+                if (
+                    getattr(e, "status_code", None) == 429
+                    and self._is_daily_token_limit(e)
+                    and self._active + 1 < len(self._clients)
+                ):
+                    self._active += 1
+                    continue
+                if getattr(e, "status_code", None) == 429 and attempt < 2 + len(self._clients) - 1:
+                    await asyncio.sleep(self._retry_after(e))
+                    continue
+                raise self._handle_error(e) from e
+        if response is None:
+            raise GroqError("No pude procesar la imagen ahora mismo.")
 
         answer = (response.choices[0].message.content or "").strip()
         if not answer:
@@ -436,14 +463,30 @@ class GroqService:
         return answer
 
     async def transcribe(self, audio_bytes: bytes, filename: str = "audio.ogg") -> str:
-        """Convierte una nota de voz en texto usando Whisper (vía Groq)."""
-        try:
-            response = await self.client.audio.transcriptions.create(
-                file=(filename, audio_bytes),
-                model=AUDIO_MODEL,
-            )
-        except Exception as e:
-            raise self._handle_error(e) from e
+        """Convierte una nota de voz en texto usando Whisper, con reintentos y rotación."""
+        self._reset_active_client_if_new_day()
+        response = None
+        for attempt in range(3 + len(self._clients) - 1):
+            try:
+                response = await self.client.audio.transcriptions.create(
+                    file=(filename, audio_bytes),
+                    model=AUDIO_MODEL,
+                )
+                break
+            except Exception as e:
+                if (
+                    getattr(e, "status_code", None) == 429
+                    and self._is_daily_token_limit(e)
+                    and self._active + 1 < len(self._clients)
+                ):
+                    self._active += 1
+                    continue
+                if getattr(e, "status_code", None) == 429 and attempt < 2 + len(self._clients) - 1:
+                    await asyncio.sleep(self._retry_after(e))
+                    continue
+                raise self._handle_error(e) from e
+        if response is None:
+            raise GroqError("No pude transcribir el audio ahora mismo.")
 
         text = (response.text or "").strip()
         if not text:
