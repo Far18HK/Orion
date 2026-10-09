@@ -106,8 +106,10 @@ class NotionService:
                 parent={"database_id": self.database_id}, properties=properties, **kwargs
             )
         except Exception as e:
+            # Extraemos el mensaje real de Notion para diagnosticar el problema
+            detail = getattr(e, "body", None) or getattr(e, "message", None) or str(e)
             raise NotionError(
-                "No pude guardar la nota en Notion 😕 revisa el token y el ID de la base de datos."
+                f"No pude guardar la nota en Notion 😕\nError: {detail}"
             ) from e
         return page.get("url", "")
 
