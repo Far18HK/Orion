@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 
 from groq import AsyncGroq
 
+from services.github import GitHubService
 from services.notion import NotionService
 from services.reminders import ReminderService
 from services.tools import ToolContext, build_tool_specs, format_now, run_tool, user_now
@@ -25,6 +26,11 @@ SYSTEM_PROMPT = (
     "hacerlo ni le pidas comandos.\n"
     "- Puedes encadenar varias herramientas en un mismo turno (p. ej. buscar y luego leer la "
     "mejor página, o listar recordatorios y luego cancelar uno).\n"
+    "- Puedes navegar: abre páginas con read_webpage y sigue sus enlaces hasta encontrar lo "
+    "que el usuario necesita, sin pedirle que lo haga él. Dile si una página no cargó o no sirve.\n"
+    "- Para analizar código de GitHub: empieza con github_repo_overview y github_list_files, lee "
+    "solo los archivos relevantes con github_read_file y da conclusiones concretas citando "
+    "archivo y línea. No inventes el contenido de archivos que no leíste; di cuáles revisaste.\n"
     "- Para dudas sobre hechos actuales (noticias, precios, resultados, versiones) busca antes "
     "de responder. En la charla normal, no uses herramientas.\n"
     "- Para cualquier cuenta no trivial usa calculate. Para fechas relativas ('el viernes', "
@@ -48,7 +54,7 @@ AUDIO_MODEL = "whisper-large-v3-turbo"
 NON_CHAT_KEYWORDS = ("whisper", "guard", "tts", "orpheus", "embed")
 MODELS_CACHE_SECONDS = 600
 
-MAX_TOOL_ROUNDS = 6  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
+MAX_TOOL_ROUNDS = 8  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
 
 
 class GroqError(Exception):
@@ -67,12 +73,17 @@ class GroqService:
         max_history: int,
         reminders: ReminderService | None = None,
         notion: NotionService | None = None,
+        github: GitHubService | None = None,
+        github_user_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.client = AsyncGroq(api_key=api_key)
         self.model = model
         # Servicios a los que el agente puede llegar mediante herramientas
         self.reminders = reminders
         self.notion = notion
+        # GitHub da acceso a repos privados: solo se ofrece a estos ids de Telegram
+        self.github = github
+        self.github_user_ids = github_user_ids
         # Historial por usuario: deque descarta solo los mensajes más viejos
         self._history: dict[int, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
         # Documento cargado por usuario: (nombre, texto). Uno a la vez
@@ -190,6 +201,7 @@ class GroqService:
             user_id=user_id,
             reminders=self.reminders,
             notion=self.notion,
+            github=self.github if user_id in self.github_user_ids else None,
         )
         specs = build_tool_specs(ctx)
         messages = [*self._context_messages(user_id, ctx), {"role": "user", "content": text}]

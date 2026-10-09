@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from ddgs import DDGS
 
+from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderError, ReminderService
 from services.schedule_parser import find_timezones, format_when
@@ -50,6 +51,7 @@ class ToolContext:
     user_id: int
     reminders: ReminderService | None = None
     notion: NotionService | None = None
+    github: GitHubService | None = None  # Solo para los dueños autorizados (ver GroqService.ask)
 
 
 def format_now(now: datetime) -> str:
@@ -196,6 +198,27 @@ def _html_to_text(raw: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+MAX_LINKS = 25
+_LINK = re.compile(r"""(?is)<a\s[^>]*?href\s*=\s*["']([^"'#][^"']*)["'][^>]*>(.*?)</a>""")
+
+
+def _extract_links(raw: str, base_url: str) -> list[tuple[str, str]]:
+    """Enlaces http(s) únicos de la página: [(texto, url absoluta)]. Para que el agente navegue."""
+    seen: set[str] = set()
+    links: list[tuple[str, str]] = []
+    for href, label in _LINK.findall(raw):
+        url = urljoin(base_url, html.unescape(href.strip()))
+        if urlparse(url).scheme not in ("http", "https") or url in seen:
+            continue
+        seen.add(url)
+        text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", label)).split())
+        if text:
+            links.append((text[:80], url))
+        if len(links) >= MAX_LINKS:
+            break
+    return links
+
+
 async def _t_read_webpage(ctx: ToolContext, args: dict) -> str:
     url = str(args.get("url", "")).strip()
     headers = {"User-Agent": "Mozilla/5.0 (compatible; AsistenteBot/1.0)"}
@@ -224,7 +247,14 @@ async def _t_read_webpage(ctx: ToolContext, args: dict) -> str:
     text = _html_to_text(raw) if "html" in kind else raw
     if not text.strip():
         return "La página no tiene texto legible."
-    return f"Contenido de {url}:\n{text[:MAX_TOOL_RESULT - 200]}"
+    links = _extract_links(raw, url) if "html" in kind else []
+    links_text = "\n".join(f"- {label}: {link}" for label, link in links)
+    # Texto y enlaces comparten el tope: dejamos hueco fijo para los enlaces
+    room = MAX_TOOL_RESULT - 200 - (len(links_text) + 40 if links else 0)
+    out = f"Contenido de {url}:\n{text[:max(room, 1000)]}"
+    if links:
+        out += f"\n\nEnlaces de la página (puedes abrirlos con read_webpage):\n{links_text}"
+    return out
 
 
 # ---------------------------------------------------------------- hora y cálculo
@@ -382,6 +412,44 @@ async def _t_search_notes(ctx: ToolContext, args: dict) -> str:
         return f"Error: {e}"
 
 
+# ---------------------------------------------------------------- GitHub (solo lectura)
+
+def _gh(fn):
+    """Adapta un método de GitHubService a handler de herramienta: GitHubError -> texto."""
+    async def handler(ctx: ToolContext, args: dict) -> str:
+        try:
+            return await fn(ctx.github, args)
+        except GitHubError as e:
+            return f"Error: {e}"
+    return handler
+
+
+def _int(args: dict, key: str, default: int) -> int:
+    try:
+        return int(args.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+_t_gh_list_repos = _gh(lambda gh, a: gh.list_repos(_int(a, "limit", 20)))
+_t_gh_overview = _gh(lambda gh, a: gh.overview(str(a.get("repo", ""))))
+_t_gh_list_files = _gh(
+    lambda gh, a: gh.list_files(str(a.get("repo", "")), str(a.get("path", "")), a.get("ref") or None)
+)
+_t_gh_read_file = _gh(
+    lambda gh, a: gh.read_file(
+        str(a.get("repo", "")), str(a.get("path", "")), a.get("ref") or None, _int(a, "start_line", 1)
+    )
+)
+_t_gh_search = _gh(lambda gh, a: gh.search_code(str(a.get("query", "")), a.get("repo") or None))
+_t_gh_commits = _gh(
+    lambda gh, a: gh.recent_commits(str(a.get("repo", "")), _int(a, "limit", 10), a.get("path") or None)
+)
+_t_gh_issues = _gh(
+    lambda gh, a: gh.issues(str(a.get("repo", "")), str(a.get("state", "open")), _int(a, "limit", 10))
+)
+
+
 # ---------------------------------------------------------------- registro
 
 Handler = Callable[[ToolContext, dict], Awaitable[str]]
@@ -430,8 +498,10 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "read_webpage",
-        "Abre un enlace y devuelve su texto. Úsala cuando el usuario te pase una URL, o para "
-        "leer a fondo un resultado de web_search cuando el resumen no alcance.",
+        "Abre una página web y devuelve su texto y sus enlaces. Úsala cuando el usuario te pase "
+        "una URL, para leer a fondo un resultado de web_search, o para navegar: si la respuesta "
+        "no está en la página, abre uno de sus enlaces y sigue (máximo unas pocas páginas). "
+        "No ejecuta JavaScript ni hace clics ni formularios.",
         {"url": _str("URL completa, con http:// o https://.")},
         ("url",),
         _t_read_webpage,
@@ -534,6 +604,85 @@ TOOLS: list[Tool] = [
         ("query",),
         _t_search_notes,
         needs="notion",
+    ),
+    Tool(
+        "github_list_repos",
+        "Lista los repositorios de GitHub del usuario (privados incluidos), el más reciente primero.",
+        {"limit": {"type": "integer", "description": "Cuántos (1-50, por defecto 20)."}},
+        (),
+        _t_gh_list_repos,
+        needs="github",
+    ),
+    Tool(
+        "github_repo_overview",
+        "Resumen de un repo: descripción, lenguajes, carpetas de la raíz y el inicio del README. "
+        "Es el primer paso para analizar un proyecto.",
+        {"repo": _str("'nombre' (del usuario) o 'usuario/nombre'.")},
+        ("repo",),
+        _t_gh_overview,
+        needs="github",
+    ),
+    Tool(
+        "github_list_files",
+        "Lista los archivos de un repo (sin node_modules, venv, etc.), con tamaños.",
+        {
+            "repo": _str("'nombre' o 'usuario/nombre'."),
+            "path": _str("Opcional: carpeta para acotar, p. ej. 'handlers'."),
+            "ref": _str("Opcional: rama, tag o commit. Por defecto la rama principal."),
+        },
+        ("repo",),
+        _t_gh_list_files,
+        needs="github",
+    ),
+    Tool(
+        "github_read_file",
+        "Lee un archivo del repo con números de línea. Devuelve ~5000 caracteres por llamada; "
+        "si el archivo sigue, repite con el start_line que indica el final. Lee solo lo relevante.",
+        {
+            "repo": _str("'nombre' o 'usuario/nombre'."),
+            "path": _str("Ruta del archivo, p. ej. 'services/tools.py'."),
+            "start_line": {"type": "integer", "description": "Línea desde la que leer (por defecto 1)."},
+            "ref": _str("Opcional: rama, tag o commit."),
+        },
+        ("repo", "path"),
+        _t_gh_read_file,
+        needs="github",
+    ),
+    Tool(
+        "github_search_code",
+        "Busca texto en el código (rama principal) de un repo o de todos los repos del usuario. "
+        "Devuelve rutas; luego lee con github_read_file.",
+        {
+            "query": _str("Texto o identificador a buscar, p. ej. 'def create_reminder'."),
+            "repo": _str("Opcional: limitar a 'nombre' o 'usuario/nombre'."),
+        },
+        ("query",),
+        _t_gh_search,
+        needs="github",
+    ),
+    Tool(
+        "github_recent_commits",
+        "Últimos commits de un repo (opcionalmente solo los que tocan una ruta).",
+        {
+            "repo": _str("'nombre' o 'usuario/nombre'."),
+            "limit": {"type": "integer", "description": "1-20, por defecto 10."},
+            "path": _str("Opcional: archivo o carpeta."),
+        },
+        ("repo",),
+        _t_gh_commits,
+        needs="github",
+    ),
+    Tool(
+        "github_issues",
+        "Issues y pull requests de un repo.",
+        {
+            "repo": _str("'nombre' o 'usuario/nombre'."),
+            "state": _str("'open' (defecto), 'closed' o 'all'.", enum=["open", "closed", "all"]),
+            "limit": {"type": "integer", "description": "1-20, por defecto 10."},
+        },
+        ("repo",),
+        _t_gh_issues,
+        needs="github",
     ),
 ]
 _BY_NAME = {t.name: t for t in TOOLS}
