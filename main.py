@@ -30,12 +30,6 @@ async def main() -> None:
         )
 
     # Inyección de dependencias: los handlers reciben estos objetos como parámetros
-    dp["ai"] = GroqService(
-        api_key=settings.groq_api_key,
-        model=settings.groq_model,
-        max_history=settings.max_history,
-    )
-
     logging.info("Base de datos de recordatorios: %s", settings.db_path)
     reminder_service = ReminderService(
         token=settings.telegram_token,
@@ -53,6 +47,15 @@ async def main() -> None:
     else:
         dp["notion"] = None
         logging.warning("NOTION_TOKEN/NOTION_DATABASE_ID no configurados: /nota quedará deshabilitado")
+
+    # El agente se crea al final porque sus herramientas usan recordatorios y Notion
+    dp["ai"] = GroqService(
+        api_key=settings.groq_api_key,
+        model=settings.groq_model,
+        max_history=settings.max_history,
+        reminders=reminder_service,
+        notion=dp["notion"],
+    )
 
     # El orden importa: chat va ÚLTIMO porque atrapa cualquier mensaje de texto restante
     dp.include_router(start.router)
