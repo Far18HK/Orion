@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 
 from config import load_settings
 from handlers import chat, media, notes, reminders, start
-from services.gemini import GeminiService
+from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
 
@@ -21,11 +21,10 @@ async def main() -> None:
     bot = Bot(token=settings.telegram_token)
     dp = Dispatcher()
 
-    # Inyección de dependencias: los handlers reciben estos objetos como parámetros.
-    # GeminiService ya incluye búsqueda web de Google como herramienta automática.
-    dp["gemini"] = GeminiService(
-        api_key=settings.gemini_api_key,
-        model=settings.gemini_model,
+    # Inyección de dependencias: los handlers reciben estos objetos como parámetros
+    dp["ai"] = GroqService(
+        api_key=settings.groq_api_key,
+        model=settings.groq_model,
         max_history=settings.max_history,
     )
 
@@ -51,7 +50,7 @@ async def main() -> None:
 
     # Ignora mensajes acumulados mientras el bot estuvo apagado
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Bot iniciado con el modelo %s", settings.gemini_model)
+    logging.info("Bot iniciado con el modelo %s (Groq)", settings.groq_model)
     await dp.start_polling(bot)
 
 
