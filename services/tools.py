@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from ddgs import DDGS
 
+from services.discord_monitor import DiscordMonitorError, read_recent_messages
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderError, ReminderService
@@ -53,8 +54,11 @@ class ToolContext:
     notion: NotionService | None = None
     github: GitHubService | None = None  # Solo para los dueños autorizados (ver GroqService.ask)
     platform: str = "telegram"  # "telegram" | "discord": decide por dónde llegan los recordatorios
-    discord_token: str | None = None  # Solo para usuarios autorizados a mandar DMs (ver GroqService.ask)
+    discord_token: str | None = None  # Solo para usuarios autorizados a mandar DMs
+    discord_monitor_token: str | None = None  # Solo para usuarios autorizados a leer canales
+    discord_monitor_channel_ids: frozenset[int] = frozenset()
     discord_dm_ids: frozenset[int] = frozenset()  # Únicos destinatarios permitidos
+    team_runner: Callable[[str], Awaitable[str]] | None = None
 
 
 def format_now(now: datetime) -> str:
@@ -505,6 +509,34 @@ async def _t_send_discord_dm(ctx: ToolContext, args: dict) -> str:
     return "Mensaje enviado por Discord."
 
 
+async def _t_read_discord_channel(ctx: ToolContext, args: dict) -> str:
+    """Lee mensajes solo cuando el usuario lo pide; no vigila continuamente."""
+    raw_channel = str(args.get("channel_id") or "").strip()
+    if not raw_channel and ctx.platform == "discord":
+        raw_channel = str(ctx.chat_id)
+    if not raw_channel.isdigit():
+        return "Error: indica el ID numérico del canal de Discord."
+    try:
+        return await read_recent_messages(
+            ctx.discord_monitor_token,
+            int(raw_channel),
+            ctx.discord_monitor_channel_ids,
+            limit=int(args.get("limit", 25)),
+            query=str(args.get("query", "")),
+        )
+    except (DiscordMonitorError, ValueError) as e:
+        return f"Error: {e}"
+
+
+async def _t_team_reason(ctx: ToolContext, args: dict) -> str:
+    task = str(args.get("task", "")).strip()
+    if not task:
+        return "Error: falta la tarea para el equipo de IAs."
+    if ctx.team_runner is None:
+        return "Error: el modo multi-cerebro no está configurado; usa 2 o 3 API keys."
+    return await ctx.team_runner(task)
+
+
 # ---------------------------------------------------------------- GitHub (solo lectura)
 
 def _gh(fn):
@@ -765,6 +797,30 @@ TOOLS: list[Tool] = [
         ("text",),
         _t_send_discord_dm,
         needs="discord_token",
+    ),
+    Tool(
+        "read_discord_channel",
+        "Lee bajo demanda los mensajes recientes de un canal de Discord autorizado. "
+        "No mantiene vigilancia continua. Si el usuario pide revisar Discord, usa esta "
+        "herramienta; desde Discord puedes omitir channel_id para revisar el canal actual.",
+        {
+            "channel_id": _str("ID numérico del canal; opcional si la petición viene de Discord."),
+            "limit": {"type": "integer", "description": "Cantidad de mensajes, entre 1 y 100."},
+            "query": _str("Texto opcional para filtrar los mensajes recientes."),
+        },
+        (),
+        _t_read_discord_channel,
+        needs="discord_monitor_token",
+    ),
+    Tool(
+        "team_reason",
+        "Coordina 2 o 3 IAs para una tarea compleja: varias analizan en paralelo y una "
+        "sintetiza una respuesta. Úsala cuando el usuario pida doble/triple cerebro, "
+        "comparación, revisión profunda o una segunda opinión. No la uses para preguntas simples.",
+        {"task": _str("Tarea completa que deben analizar las IAs.")},
+        ("task",),
+        _t_team_reason,
+        needs="team_runner",
     ),
     Tool(
         "github_list_repos",
