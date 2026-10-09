@@ -36,6 +36,7 @@ async def main() -> None:
         token=settings.telegram_token,
         db_path=settings.db_path,
         default_timezone=settings.timezone,
+        discord_token=settings.discord_token,
     )
     reminder_service.start()
     dp["reminders"] = reminder_service
@@ -58,7 +59,7 @@ async def main() -> None:
         logging.warning("GITHUB_TOKEN sin GITHUB_OWNER_IDS: GitHub deshabilitado (usa /id para ver tu id)")
 
     # El agente se crea al final porque sus herramientas usan recordatorios y Notion
-    dp["ai"] = GroqService(
+    ai = GroqService(
         api_key=settings.groq_api_key,
         model=settings.groq_model,
         max_history=settings.max_history,
@@ -67,6 +68,7 @@ async def main() -> None:
         github=github,
         github_user_ids=settings.github_owner_ids,
     )
+    dp["ai"] = ai
 
     # El orden importa: chat va ÚLTIMO porque atrapa cualquier mensaje de texto restante
     dp.include_router(start.router)
@@ -83,7 +85,25 @@ async def main() -> None:
     # Ignora mensajes acumulados mientras el bot estuvo apagado
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Bot iniciado con el modelo %s (Groq)", settings.groq_model)
-    await dp.start_polling(bot)
+
+    tasks = [dp.start_polling(bot)]
+    if settings.discord_token:
+        tasks.append(_run_discord(ai, settings))
+    await asyncio.gather(*tasks)
+
+
+async def _run_discord(ai: GroqService, settings) -> None:
+    """Corre el frente de Discord sin tumbar a Telegram si falla (token malo, intent apagado...)."""
+    try:
+        import discord_bot  # Import tardío: sin DISCORD_TOKEN no hace falta tener discord.py
+    except ImportError:
+        logging.error("Hay DISCORD_TOKEN pero falta discord.py: agrégalo a requirements.txt")
+        return
+    client = discord_bot.DiscordFront(ai, settings.rate_limit_messages, settings.rate_limit_window)
+    try:
+        await client.start(settings.discord_token)
+    except Exception:  # noqa: BLE001 - Telegram debe seguir vivo pase lo que pase
+        logging.exception("Discord se detuvo")
 
 
 if __name__ == "__main__":
