@@ -1,6 +1,9 @@
 """Servicio de notas: crea, lista y busca páginas en una base de datos de Notion."""
+import logging
 import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 from datetime import date, datetime
 
 from notion_client import AsyncClient
@@ -59,6 +62,7 @@ class NotionService:
             ) from e
 
         props = db.get("properties", {})
+        logger.info("Notion props: %s", {k: v.get("type") for k, v in props.items()})
 
         def first(kind: str) -> str | None:
             return next((name for name, p in props.items() if p.get("type") == kind), None)
