@@ -12,6 +12,8 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Búsqueda web, clima, hora y calculadora.
 - Lectura segura de enlaces con protección básica contra SSRF.
 - Análisis de repositorios GitHub en modo solo lectura y con lista blanca.
+- Lectura bajo demanda de canales autorizados de Discord.
+- Modo multi-cerebro: 2 o 3 claves de Groq trabajan en paralelo y una sintetiza.
 
 ## Instalación local
 
@@ -34,6 +36,10 @@ Consulta `.env.example`. Las variables mínimas son:
 Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura también `DAILY_MESSAGE_LIMIT` para proteger la cuota de Groq.
 
 `DISCORD_DM_IDS` debe contener los IDs de Discord autorizados a recibir mensajes directos. En Discord, escribe `id` al bot para obtener tu ID.
+
+Para que Orion pueda revisar Discord cuando se lo pidas, configura `DISCORD_MONITOR_CHANNEL_IDS` con los IDs de canales permitidos, `DISCORD_MONITOR_USER_IDS` para usuarios de Discord y/o `DISCORD_MONITOR_TELEGRAM_IDS` para usuarios de Telegram. La lectura es bajo demanda; no se mantiene una vigilancia permanente.
+
+Para activar el modo multi-cerebro, define `GROQ_API_KEYS` con 2 o 3 claves de cuentas distintas y `MULTI_BRAIN_SIZE=2` o `MULTI_BRAIN_SIZE=3`. El agente usará `team_reason` cuando pidas una segunda opinión, una revisión profunda o "doble/triple cerebro". Esto consume una llamada por analista y una llamada final de síntesis.
 
 ## Railway
 

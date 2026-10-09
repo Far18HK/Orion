@@ -73,6 +73,10 @@ async def main() -> None:
         github_user_ids=settings.github_owner_ids,
         discord_token=settings.discord_token,
         discord_dm_ids=settings.discord_dm_ids,
+        discord_monitor_user_ids=settings.discord_monitor_user_ids,
+        discord_monitor_telegram_ids=settings.discord_monitor_telegram_ids,
+        discord_monitor_channel_ids=settings.discord_monitor_channel_ids,
+        multi_brain_size=settings.multi_brain_size,
     )
     dp["ai"] = ai
 

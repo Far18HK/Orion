@@ -19,6 +19,7 @@ class Settings:
     telegram_token: str
     groq_api_keys: tuple[str, ...]  # Una o varias; si una cuenta agota su cuota diaria, pasa a la siguiente
     groq_model: str
+    multi_brain_size: int  # 0 = desactivado; 2 o 3 claves para análisis sincronizado
     max_history: int  # Cantidad de mensajes que recuerda (pregunta + respuesta cuentan por separado)
     notion_token: str | None
     notion_database_id: str | None
@@ -29,6 +30,9 @@ class Settings:
     daily_message_limit: int  # Mensajes diarios por usuario; 0 = sin límite
     discord_token: str | None  # Si existe, el agente también atiende en Discord
     discord_dm_ids: frozenset[int]  # Ids de Discord a los que el agente puede escribir por DM
+    discord_monitor_user_ids: frozenset[int]  # Usuarios de Discord que pueden leer canales
+    discord_monitor_telegram_ids: frozenset[int]  # Usuarios de Telegram autorizados a leer Discord
+    discord_monitor_channel_ids: frozenset[int]  # Canales de Discord que se pueden consultar
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
@@ -91,6 +95,9 @@ def load_settings() -> Settings:
     # Forzamos número par para que el historial siempre quede en pares usuario/modelo
     max_history = int(os.getenv("MAX_HISTORY", "20"))
     max_history -= max_history % 2
+    multi_brain_size = min(max(int(os.getenv("MULTI_BRAIN_SIZE", "0")), 0), 3)
+    if multi_brain_size == 1:
+        multi_brain_size = 0
 
     # Notion es opcional: si no se configura, el comando /nota avisa en vez de fallar
     notion_token = os.getenv("NOTION_TOKEN") or None
@@ -122,6 +129,20 @@ def load_settings() -> Settings:
         )
     except ValueError:
         raise RuntimeError("DISCORD_DM_IDS debe ser una lista de números: 123456,789012") from None
+    try:
+        discord_monitor_user_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MONITOR_USER_IDS", "").replace(" ", "").split(",") if x
+        )
+        discord_monitor_telegram_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MONITOR_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
+        )
+        discord_monitor_channel_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MONITOR_CHANNEL_IDS", "").replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError(
+            "DISCORD_MONITOR_*_IDS debe contener listas de números separadas por coma"
+        ) from None
     github_token = os.getenv("GITHUB_TOKEN") or None
     try:
         github_owner_ids = frozenset(
@@ -137,6 +158,7 @@ def load_settings() -> Settings:
         telegram_token=token,
         groq_api_keys=groq_api_keys,
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        multi_brain_size=multi_brain_size,
         max_history=max(max_history, 2),
         notion_token=notion_token,
         notion_database_id=notion_database_id,
@@ -147,6 +169,9 @@ def load_settings() -> Settings:
         daily_message_limit=daily_message_limit,
         discord_token=discord_token,
         discord_dm_ids=discord_dm_ids,
+        discord_monitor_user_ids=discord_monitor_user_ids,
+        discord_monitor_telegram_ids=discord_monitor_telegram_ids,
+        discord_monitor_channel_ids=discord_monitor_channel_ids,
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,
