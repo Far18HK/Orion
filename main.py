@@ -5,7 +5,9 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from config import load_settings
-from handlers import chat, media, notes, reminders, start
+from handlers import chat, documents, media, model, notes, reminders, start
+from handlers.start import BOT_COMMANDS
+from middlewares import RateLimitMiddleware
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
@@ -20,6 +22,12 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_token)
     dp = Dispatcher()
+
+    # Límite de mensajes por usuario: protege tu cuota de Groq de ráfagas o abusos
+    if settings.rate_limit_messages > 0:
+        dp.message.outer_middleware(
+            RateLimitMiddleware(settings.rate_limit_messages, settings.rate_limit_window)
+        )
 
     # Inyección de dependencias: los handlers reciben estos objetos como parámetros
     dp["ai"] = GroqService(
@@ -46,7 +54,12 @@ async def main() -> None:
     dp.include_router(reminders.router)
     dp.include_router(notes.router)
     dp.include_router(media.router)
+    dp.include_router(documents.router)
+    dp.include_router(model.router)
     dp.include_router(chat.router)
+
+    # Menú de comandos (botón "/" en Telegram)
+    await bot.set_my_commands(BOT_COMMANDS)
 
     # Ignora mensajes acumulados mientras el bot estuvo apagado
     await bot.delete_webhook(drop_pending_updates=True)

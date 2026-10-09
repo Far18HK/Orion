@@ -15,6 +15,8 @@ class Settings:
     max_history: int  # Cantidad de mensajes que recuerda (pregunta + respuesta cuentan por separado)
     notion_token: str | None
     notion_database_id: str | None
+    rate_limit_messages: int  # Mensajes máximos por usuario en la ventana (0 = sin límite)
+    rate_limit_window: int  # Segundos de la ventana
 
 
 def load_settings() -> Settings:
@@ -35,6 +37,9 @@ def load_settings() -> Settings:
     notion_token = os.getenv("NOTION_TOKEN") or None
     notion_database_id = os.getenv("NOTION_DATABASE_ID") or None
 
+    rate_limit_messages = max(int(os.getenv("RATE_LIMIT_MESSAGES", "10")), 0)
+    rate_limit_window = max(int(os.getenv("RATE_LIMIT_WINDOW", "60")), 1)
+
     return Settings(
         telegram_token=token,
         groq_api_key=api_key,
@@ -42,4 +47,6 @@ def load_settings() -> Settings:
         max_history=max(max_history, 2),
         notion_token=notion_token,
         notion_database_id=notion_database_id,
+        rate_limit_messages=rate_limit_messages,
+        rate_limit_window=rate_limit_window,
     )
