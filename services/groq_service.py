@@ -254,6 +254,7 @@ class GroqService:
         text: str,
         saved_as: str | None = None,
         chat_id: int | None = None,
+        platform: str = "telegram",
     ) -> str:
         """Corre el agente: el modelo decide si responde directo o usa herramientas.
 
@@ -267,6 +268,7 @@ class GroqService:
             reminders=self.reminders,
             notion=self.notion,
             github=self.github if user_id in self.github_user_ids else None,
+            platform=platform,
         )
         specs = build_tool_specs(ctx)
         messages = [*self._context_messages(user_id, ctx), {"role": "user", "content": text}]

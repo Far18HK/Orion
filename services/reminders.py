@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import aiohttp
 from aiogram import Bot
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -27,6 +28,20 @@ async def _send_reminder(token: str, chat_id: int, text: str) -> None:
         await bot.session.close()
 
 
+async def _send_discord_reminder(token: str, channel_id: int, text: str) -> None:
+    """Igual que _send_reminder pero por la API REST de Discord (no necesita el cliente abierto).
+
+    También a nivel de módulo y con la misma firma, para que APScheduler la pueda guardar.
+    """
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {token}", "User-Agent": "DiscordBot (asistente, 1.0)"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with session.post(
+            url, headers=headers, json={"content": f"⏰ Recordatorio: {text}"[:2000]}
+        ) as resp:
+            resp.raise_for_status()
+
+
 @dataclass(frozen=True)
 class ReminderInfo:
     id: str
@@ -38,9 +53,14 @@ class ReminderInfo:
 
 class ReminderService:
     def __init__(
-        self, token: str, db_path: str = "reminders.db", default_timezone: str | None = None
+        self,
+        token: str,
+        db_path: str = "reminders.db",
+        default_timezone: str | None = None,
+        discord_token: str | None = None,
     ) -> None:
         self.token = token
+        self.discord_token = discord_token  # Si no hay, los recordatorios pedidos desde Discord se rechazan
         self.db_path = db_path
         self.default_timezone = default_timezone  # Zona para chats que no han usado /zona
         # SQLAlchemyJobStore guarda los recordatorios en disco: sobreviven a un reinicio del bot
@@ -89,7 +109,7 @@ class ReminderService:
             if len(j.args) >= 3 and j.args[1] == chat_id
         ]
 
-    def create(self, chat_id: int, args: str) -> tuple[str, str]:
+    def create(self, chat_id: int, args: str, platform: str = "telegram") -> tuple[str, str]:
         """Interpreta '<cuándo> <mensaje>', lo agenda y devuelve (mensaje, descripción del cuándo)."""
         tz = self.get_timezone(chat_id)
         schedule, text = parse_reminder(args, tz)
@@ -99,17 +119,24 @@ class ReminderService:
                 f"Ya tienes {MAX_PER_CHAT} recordatorios pendientes 😅 Cancela alguno con /recordatorios."
             )
 
+        if platform == "discord":
+            if not self.discord_token:
+                raise ReminderError("Los recordatorios por Discord no están configurados.")
+            send, token = _send_discord_reminder, self.discord_token
+        else:
+            send, token = _send_reminder, self.token
+
         common = {
-            "args": [self.token, chat_id, text],
+            "args": [token, chat_id, text],
             "id": uuid4().hex,
             "name": schedule.description,
             "misfire_grace_time": 3600,  # Si el bot estuvo apagado, lo manda al volver (hasta 1h después)
         }
         if schedule.kind == "once":
-            self.scheduler.add_job(_send_reminder, trigger="date", run_date=schedule.run_at, **common)
+            self.scheduler.add_job(send, trigger="date", run_date=schedule.run_at, **common)
         elif schedule.kind == "interval":
             self.scheduler.add_job(
-                _send_reminder,
+                send,
                 trigger="interval",
                 seconds=int(schedule.interval.total_seconds()),
                 coalesce=True,  # Si se acumularon varios por estar apagado, manda uno solo
@@ -120,7 +147,7 @@ class ReminderService:
             if schedule.kind == "weekly":
                 cron["day_of_week"] = schedule.weekday
             self.scheduler.add_job(
-                _send_reminder, trigger="cron", coalesce=True, **cron, **common
+                send, trigger="cron", coalesce=True, **cron, **common
             )
         return text, schedule.description
 

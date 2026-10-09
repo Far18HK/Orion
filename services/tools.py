@@ -52,6 +52,7 @@ class ToolContext:
     reminders: ReminderService | None = None
     notion: NotionService | None = None
     github: GitHubService | None = None  # Solo para los dueños autorizados (ver GroqService.ask)
+    platform: str = "telegram"  # "telegram" | "discord": decide por dónde llegan los recordatorios
 
 
 def format_now(now: datetime) -> str:
@@ -332,7 +333,7 @@ async def _t_create_reminder(ctx: ToolContext, args: dict) -> str:
     if not when or not message:
         return "Error: faltan 'when' y/o 'message'."
     try:
-        text, description = ctx.reminders.create(ctx.chat_id, f"{when} {message}")
+        text, description = ctx.reminders.create(ctx.chat_id, f"{when} {message}", ctx.platform)
     except ReminderError as e:
         return f"Error: {e}"
     return f"Recordatorio creado: «{text}» {description}."
