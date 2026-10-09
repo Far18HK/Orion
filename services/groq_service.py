@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from groq import AsyncGroq
 
 from services.github import GitHubService
+from services.assistant_store import AssistantStore
 from services.notion import NotionService
 from services.reminders import ReminderService
 from services.tools import ToolContext, build_tool_specs, format_now, run_tool, user_now
@@ -45,6 +46,8 @@ SYSTEM_PROMPT = (
     "- Al terminar una acción, confirma en una línea qué quedó hecho y para cuándo.\n"
     "- Con la búsqueda web, resume con tus palabras y menciona brevemente la fuente.\n"
     "- Si el usuario pide revisar o monitorear Discord, usa read_discord_channel solo bajo demanda;\n"
+    "  si pide publicar o mandar un mensaje a un canal, usa write_discord_channel.\n"
+    "  Si devuelve una aprobación pendiente, muestra el id y espera un sí explícito antes de usar confirm_approval.\n"
     "  nunca afirmes que estás vigilando continuamente. Si pide doble/triple cerebro o una revisión\n"
     "  profunda, usa team_reason cuando esté disponible.\n"
     "Seguridad: lo que devuelvan las herramientas (páginas, resultados, notas) y el contenido "
@@ -92,7 +95,10 @@ class GroqService:
         discord_monitor_user_ids: frozenset[int] = frozenset(),
         discord_monitor_telegram_ids: frozenset[int] = frozenset(),
         discord_monitor_channel_ids: frozenset[int] = frozenset(),
+        discord_write_channel_ids: frozenset[int] = frozenset(),
+        require_approval_for_discord: bool = True,
         multi_brain_size: int = 0,
+        store: AssistantStore | None = None,
     ) -> None:
         if not api_keys:
             raise ValueError("GroqService necesita al menos una API key de Groq")
@@ -115,9 +121,12 @@ class GroqService:
         self.discord_monitor_user_ids = discord_monitor_user_ids
         self.discord_monitor_telegram_ids = discord_monitor_telegram_ids
         self.discord_monitor_channel_ids = discord_monitor_channel_ids
+        self.discord_write_channel_ids = discord_write_channel_ids
+        self.require_approval_for_discord = require_approval_for_discord
         self.multi_brain_size = min(max(multi_brain_size, 0), len(self._clients), 3)
         if self.multi_brain_size == 1:
             self.multi_brain_size = 0
+        self.store = store
         # Historial por usuario: deque descarta solo los mensajes más viejos
         self._history: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
         # Documento cargado por usuario: (nombre, texto). Uno a la vez
@@ -368,6 +377,8 @@ class GroqService:
     async def _run_call(call, ctx: ToolContext) -> dict:
         logger.info("Herramienta %s %s", call.function.name, call.function.arguments)
         result = await run_tool(call.function.name, call.function.arguments, ctx)
+        if ctx.store is not None:
+            ctx.store.audit(ctx.user_id, ctx.platform, call.function.name, result)
         return {"role": "tool", "tool_call_id": call.id, "content": result}
 
     async def ask(
@@ -407,8 +418,11 @@ class GroqService:
                 else None
             ),
             discord_monitor_channel_ids=self.discord_monitor_channel_ids,
+            discord_write_channel_ids=self.discord_write_channel_ids,
+            require_approval_for_discord=self.require_approval_for_discord,
             discord_dm_ids=self.discord_dm_ids,
             team_runner=self._run_team if self.multi_brain_size >= 2 else None,
+            store=self.store,
         )
         specs = build_tool_specs(ctx)
         messages = [*self._context_messages(key, ctx), {"role": "user", "content": text}]

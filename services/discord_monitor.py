@@ -65,3 +65,38 @@ async def read_recent_messages(
             pass
         lines.append(f"[{timestamp}] {author}: {content[:1500]}")
     return "\n".join(lines)
+
+
+async def send_channel_message(
+    token: str,
+    channel_id: int,
+    allowed_channel_ids: frozenset[int],
+    content: str,
+) -> str:
+    """Envía un mensaje a un canal explícitamente autorizado."""
+    if channel_id not in allowed_channel_ids:
+        raise DiscordMonitorError(
+            "Ese canal no está autorizado para escritura. Añade su ID a DISCORD_WRITE_CHANNEL_IDS."
+        )
+    content = content.strip()
+    if not content:
+        raise DiscordMonitorError("El mensaje está vacío.")
+    if len(content) > 2000:
+        raise DiscordMonitorError("Discord limita los mensajes a 2000 caracteres.")
+    headers = {
+        "Authorization": f"Bot {token}",
+        "User-Agent": "OrionDiscordMonitor/1.0",
+    }
+    async with aiohttp.ClientSession(timeout=TIMEOUT, headers=headers) as session:
+        async with session.post(
+            f"{API}/channels/{channel_id}/messages", json={"content": content}
+        ) as response:
+            if response.status in (401, 403):
+                raise DiscordMonitorError(
+                    "Discord denegó el envío. El bot necesita View Channel y Send Messages."
+                )
+            if response.status == 404:
+                raise DiscordMonitorError("No encontré ese canal o el bot ya no tiene acceso.")
+            if response.status >= 400:
+                raise DiscordMonitorError(f"Discord respondió con HTTP {response.status}.")
+    return "Mensaje enviado al canal de Discord."

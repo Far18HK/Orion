@@ -22,7 +22,12 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from ddgs import DDGS
 
-from services.discord_monitor import DiscordMonitorError, read_recent_messages
+from services.discord_monitor import (
+    DiscordMonitorError,
+    read_recent_messages,
+    send_channel_message,
+)
+from services.assistant_store import AssistantStore
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderError, ReminderService
@@ -57,8 +62,11 @@ class ToolContext:
     discord_token: str | None = None  # Solo para usuarios autorizados a mandar DMs
     discord_monitor_token: str | None = None  # Solo para usuarios autorizados a leer canales
     discord_monitor_channel_ids: frozenset[int] = frozenset()
+    discord_write_channel_ids: frozenset[int] = frozenset()
+    require_approval_for_discord: bool = True
     discord_dm_ids: frozenset[int] = frozenset()  # Únicos destinatarios permitidos
     team_runner: Callable[[str], Awaitable[str]] | None = None
+    store: AssistantStore | None = None
 
 
 def format_now(now: datetime) -> str:
@@ -528,6 +536,52 @@ async def _t_read_discord_channel(ctx: ToolContext, args: dict) -> str:
         return f"Error: {e}"
 
 
+async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
+    raw_channel = str(args.get("channel_id") or "").strip()
+    if not raw_channel and ctx.platform == "discord":
+        raw_channel = str(ctx.chat_id)
+    if not raw_channel.isdigit():
+        return "Error: indica el ID numérico del canal de Discord."
+    payload = {"channel_id": int(raw_channel), "text": str(args.get("text", ""))}
+    if ctx.require_approval_for_discord:
+        if ctx.store is None:
+            return "Error: no puedo publicar porque falta el sistema de aprobaciones."
+        approval_id = ctx.store.request_approval(ctx.user_id, "write_discord_channel", payload)
+        return f"Publicación pendiente de aprobación. Id: {approval_id}. Pide confirmar esa publicación."
+    try:
+        return await send_channel_message(
+            ctx.discord_monitor_token,
+            int(raw_channel),
+            ctx.discord_write_channel_ids,
+            str(args.get("text", "")),
+        )
+    except (DiscordMonitorError, ValueError) as e:
+        return f"Error: {e}"
+
+
+async def _t_confirm_approval(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "El sistema de aprobaciones no está configurado."
+    approval_id = str(args.get("id", "")).strip()
+    approval = ctx.store.get_approval(ctx.user_id, approval_id)
+    if not approval:
+        return "No encontré una aprobación pendiente con ese id."
+    action, payload = approval
+    if action != "write_discord_channel":
+        return "Esa acción no se puede ejecutar desde esta aprobación."
+    try:
+        result = await send_channel_message(
+            ctx.discord_monitor_token,
+            int(payload["channel_id"]),
+            ctx.discord_write_channel_ids,
+            str(payload["text"]),
+        )
+    except (DiscordMonitorError, ValueError) as e:
+        return f"Error: {e}"
+    ctx.store.resolve_approval(ctx.user_id, approval_id, "approved")
+    return result
+
+
 async def _t_team_reason(ctx: ToolContext, args: dict) -> str:
     task = str(args.get("task", "")).strip()
     if not task:
@@ -535,6 +589,82 @@ async def _t_team_reason(ctx: ToolContext, args: dict) -> str:
     if ctx.team_runner is None:
         return "Error: el modo multi-cerebro no está configurado; usa 2 o 3 API keys."
     return await ctx.team_runner(task)
+
+
+async def _t_remember(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "La memoria permanente no está configurada."
+    content = str(args.get("content", "")).strip()
+    if not content:
+        return "Error: la memoria está vacía."
+    return f"Memoria guardada con id {ctx.store.remember(ctx.user_id, content)}."
+
+
+async def _t_recall(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "La memoria permanente no está configurada."
+    rows = ctx.store.memories(ctx.user_id, str(args.get("query", "")), _int(args, "limit", 10))
+    return "\n".join(f"[{item_id}] {content}" for item_id, content in rows) or "No encontré recuerdos."
+
+
+async def _t_forget(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "La memoria permanente no está configurada."
+    ok = ctx.store.forget(ctx.user_id, str(args.get("id", "")).strip())
+    return "Memoria olvidada." if ok else "No encontré esa memoria o no te pertenece."
+
+
+async def _t_create_task(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "El gestor de tareas no está configurado."
+    title = str(args.get("title", "")).strip()
+    return f"Tarea creada con id {ctx.store.add_task(ctx.user_id, title)}." if title else "Error: falta el título."
+
+
+async def _t_list_tasks(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "El gestor de tareas no está configurado."
+    rows = ctx.store.tasks(ctx.user_id, bool(args.get("include_done", False)))
+    return "\n".join(f"[{item_id}] ({status}) {title}" for item_id, title, status in rows) or "No tienes tareas."
+
+
+async def _t_complete_task(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "El gestor de tareas no está configurado."
+    ok = ctx.store.complete_task(ctx.user_id, str(args.get("id", "")).strip())
+    return "Tarea completada." if ok else "No encontré esa tarea o no te pertenece."
+
+
+async def _t_plan_task(ctx: ToolContext, args: dict) -> str:
+    task = str(args.get("task", "")).strip()
+    if not task:
+        return "Error: falta la tarea a planificar."
+    return (
+        "Plan propuesto (todavía no ejecutado):\n"
+        "1. Definir resultado y restricciones.\n"
+        "2. Dividir la tarea en pasos verificables.\n"
+        "3. Ejecutar primero las acciones reversibles.\n"
+        "4. Verificar resultados y reportar bloqueos.\n"
+        f"Objetivo: {task}"
+    )
+
+
+async def _t_create_automation(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "El gestor de automatizaciones no está configurado."
+    instruction = str(args.get("instruction", "")).strip()
+    schedule = str(args.get("schedule", "")).strip()
+    if not instruction or not schedule:
+        return "Error: indica la instrucción y el horario."
+    item_id = ctx.store.add_automation(ctx.user_id, instruction, schedule)
+    return f"Automatización registrada con id {item_id}. Requiere conectar el scheduler para ejecutarse."
+
+
+async def _t_audit(ctx: ToolContext, args: dict) -> str:
+    if ctx.store is None:
+        return "La auditoría no está configurada."
+    rows = ctx.store.audit_entries(ctx.user_id, _int(args, "limit", 20))
+    return "\n".join(f"{created} | {action} | {details}" for action, details, created in rows) or "No hay acciones registradas."
 
 
 # ---------------------------------------------------------------- GitHub (solo lectura)
@@ -798,6 +928,15 @@ TOOLS: list[Tool] = [
         _t_send_discord_dm,
         needs="discord_token",
     ),
+    Tool("remember", "Guarda una preferencia o dato estable que el usuario quiera recordar.", {"content": _str("Dato o preferencia.")}, ("content",), _t_remember, needs="store"),
+    Tool("recall", "Busca recuerdos permanentes del usuario.", {"query": _str("Texto opcional."), "limit": {"type": "integer"}}, (), _t_recall, needs="store"),
+    Tool("forget", "Olvida una memoria usando su id; confirma antes si la intención es ambigua.", {"id": _str("Id de memoria.")}, ("id",), _t_forget, needs="store"),
+    Tool("create_task", "Crea una tarea pendiente para el usuario.", {"title": _str("Título de la tarea.")}, ("title",), _t_create_task, needs="store"),
+    Tool("list_tasks", "Lista tareas pendientes.", {"include_done": {"type": "boolean"}}, (), _t_list_tasks, needs="store"),
+    Tool("complete_task", "Marca una tarea como completada.", {"id": _str("Id exacto de la tarea.")}, ("id",), _t_complete_task, needs="store"),
+    Tool("plan_task", "Divide una tarea compleja en pasos antes de ejecutarla.", {"task": _str("Objetivo completo.")}, ("task",), _t_plan_task, needs="store"),
+    Tool("create_automation", "Registra una automatización futura, sin ejecutarla todavía.", {"instruction": _str("Qué debe hacer."), "schedule": _str("Horario o frecuencia.")}, ("instruction", "schedule"), _t_create_automation, needs="store"),
+    Tool("audit_log", "Muestra acciones recientes del asistente.", {"limit": {"type": "integer"}}, (), _t_audit, needs="store"),
     Tool(
         "read_discord_channel",
         "Lee bajo demanda los mensajes recientes de un canal de Discord autorizado. "
@@ -811,6 +950,27 @@ TOOLS: list[Tool] = [
         (),
         _t_read_discord_channel,
         needs="discord_monitor_token",
+    ),
+    Tool(
+        "write_discord_channel",
+        "Envía un mensaje a un canal Discord autorizado cuando el usuario lo pida. "
+        "Desde Discord puedes omitir channel_id para usar el canal actual. Nunca escribas "
+        "en canales que no estén en DISCORD_WRITE_CHANNEL_IDS.",
+        {
+            "channel_id": _str("ID numérico del canal; opcional si la petición viene de Discord."),
+            "text": _str("Mensaje exacto que se publicará, máximo 2000 caracteres."),
+        },
+        ("text",),
+        _t_write_discord_channel,
+        needs="discord_monitor_token",
+    ),
+    Tool(
+        "confirm_approval",
+        "Confirma y ejecuta una acción externa pendiente, usando el id que Orion mostró antes.",
+        {"id": _str("Id exacto de la aprobación pendiente.")},
+        ("id",),
+        _t_confirm_approval,
+        needs="store",
     ),
     Tool(
         "team_reason",
