@@ -538,17 +538,13 @@ async def _t_read_discord_channel(ctx: ToolContext, args: dict) -> str:
 
 
 async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
+    """Publica en un canal autorizado. La aprobación humana (si está activa) ya la pidió el
+    harness con interrupt() antes de llegar aquí: esta función solo ejecuta."""
     raw_channel = str(args.get("channel_id") or "").strip()
     if not raw_channel and ctx.platform == "discord":
         raw_channel = str(ctx.chat_id)
     if not raw_channel.isdigit():
         return "Error: indica el ID numérico del canal de Discord."
-    payload = {"channel_id": int(raw_channel), "text": str(args.get("text", ""))}
-    if ctx.require_approval_for_discord:
-        if ctx.store is None:
-            return "Error: no puedo publicar porque falta el sistema de aprobaciones."
-        approval_id = ctx.store.request_approval(ctx.user_id, "write_discord_channel", payload)
-        return f"Publicación pendiente de aprobación. Id: {approval_id}. Pide confirmar esa publicación."
     try:
         return await send_channel_message(
             ctx.discord_monitor_token,
@@ -560,27 +556,24 @@ async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
         return f"Error: {e}"
 
 
-async def _t_confirm_approval(ctx: ToolContext, args: dict) -> str:
-    if ctx.store is None:
-        return "El sistema de aprobaciones no está configurado."
-    approval_id = str(args.get("id", "")).strip()
-    approval = ctx.store.get_approval(ctx.user_id, approval_id)
-    if not approval:
-        return "No encontré una aprobación pendiente con ese id."
-    action, payload = approval
-    if action != "write_discord_channel":
-        return "Esa acción no se puede ejecutar desde esta aprobación."
+def describe_call(name: str, arguments: str) -> str:
+    """Texto corto y legible de una llamada, para pedirle al usuario que la apruebe."""
     try:
-        result = await send_channel_message(
-            ctx.discord_monitor_token,
-            int(payload["channel_id"]),
-            ctx.discord_write_channel_ids,
-            str(payload["text"]),
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    if name == "write_discord_channel":
+        channel = args.get("channel_id") or "el canal actual"
+        return f"Publicar en Discord ({channel}): «{str(args.get('text', ''))[:300]}»"
+    if name == "create_automation":
+        return (
+            f"Crear la automatización «{str(args.get('schedule', ''))[:60]}»: "
+            f"{str(args.get('instruction', ''))[:300]}"
         )
-    except (DiscordMonitorError, ValueError) as e:
-        return f"Error: {e}"
-    ctx.store.resolve_approval(ctx.user_id, approval_id, "approved")
-    return result
+    detail = json.dumps(args, ensure_ascii=False)[:300]
+    return f"{name} {detail}" if args else name
 
 
 async def _t_team_reason(ctx: ToolContext, args: dict) -> str:
@@ -959,7 +952,8 @@ TOOLS: list[Tool] = [
         "write_discord_channel",
         "Envía un mensaje a un canal Discord autorizado cuando el usuario lo pida. "
         "Desde Discord puedes omitir channel_id para usar el canal actual. Nunca escribas "
-        "en canales que no estén en DISCORD_WRITE_CHANNEL_IDS.",
+        "en canales que no estén en DISCORD_WRITE_CHANNEL_IDS. Si hace falta aprobación, "
+        "el sistema se la pide al usuario antes de ejecutar; tú solo llama a la herramienta.",
         {
             "channel_id": _str("ID numérico del canal; opcional si la petición viene de Discord."),
             "text": _str("Mensaje exacto que se publicará, máximo 2000 caracteres."),
@@ -967,14 +961,6 @@ TOOLS: list[Tool] = [
         ("text",),
         _t_write_discord_channel,
         needs="discord_monitor_token",
-    ),
-    Tool(
-        "confirm_approval",
-        "Confirma y ejecuta una acción externa pendiente, usando el id que Orion mostró antes.",
-        {"id": _str("Id exacto de la aprobación pendiente.")},
-        ("id",),
-        _t_confirm_approval,
-        needs="store",
     ),
     Tool(
         "team_reason",

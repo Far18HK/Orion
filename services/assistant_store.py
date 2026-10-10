@@ -38,6 +38,20 @@ class AssistantStore:
                     id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, platform TEXT NOT NULL,
                     action TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, platform TEXT NOT NULL,
+                    phase TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS operations (
+                    id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, platform TEXT NOT NULL,
+                    action TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    UNIQUE(user_id, name)
+                );
                 """
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(automations)")}
@@ -202,3 +216,96 @@ class AssistantStore:
                 "WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
                 (user_id, min(max(limit, 1), 50)),
             ).fetchall()
+
+    def save_checkpoint(self, user_id: int, platform: str, phase: str, payload: dict) -> None:
+        checkpoint_id = f"{platform}:{user_id}"
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO checkpoints VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET phase=excluded.phase, payload=excluded.payload, "
+                "updated_at=excluded.updated_at",
+                (
+                    checkpoint_id,
+                    user_id,
+                    platform,
+                    phase,
+                    json.dumps(payload, ensure_ascii=False),
+                    self._now(),
+                ),
+            )
+
+    def clear_checkpoint(self, user_id: int, platform: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("DELETE FROM checkpoints WHERE id = ?", (f"{platform}:{user_id}",))
+
+    def begin_operation(
+        self, user_id: int, platform: str, operation_id: str, action: str
+    ) -> str | None:
+        """Devuelve el resultado previo si ya se ejecutó; None reserva la operación."""
+        now = self._now()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            row = conn.execute(
+                "SELECT status, result FROM operations WHERE id = ? AND user_id = ? AND platform = ?",
+                (operation_id, user_id, platform),
+            ).fetchone()
+            if row and row[0] == "done":
+                return row[1]
+            conn.execute(
+                "INSERT OR REPLACE INTO operations "
+                "(id,user_id,platform,action,status,result,created_at,updated_at) "
+                "VALUES (?, ?, ?, ?, 'running', '', COALESCE((SELECT created_at FROM operations WHERE id = ?), ?), ?)",
+                (operation_id, user_id, platform, action, operation_id, now, now),
+            )
+        return None
+
+    def finish_operation(self, user_id: int, platform: str, operation_id: str, result: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE operations SET status='done', result=?, updated_at=? "
+                "WHERE id=? AND user_id=? AND platform=?",
+                (result[:6000], self._now(), operation_id, user_id, platform),
+            )
+
+    def project(self, user_id: int, name: str, description: str = "") -> str:
+        project_id = uuid4().hex[:12]
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO projects (id,user_id,name,description,created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id,name) DO UPDATE SET description=excluded.description",
+                (project_id, user_id, name.strip(), description.strip(), self._now()),
+            )
+        return project_id
+
+    def projects(self, user_id: int) -> list[tuple[str, str, str]]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            return conn.execute(
+                "SELECT id,name,description FROM projects WHERE user_id=? ORDER BY name LIMIT 50",
+                (user_id,),
+            ).fetchall()
+
+    def pending_checkpoint(self, user_id: int, platform: str) -> tuple[str, str] | None:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT phase, updated_at FROM checkpoints WHERE id=?",
+                (f"{platform}:{user_id}",),
+            ).fetchone()
+        return row if row else None
+
+    def get_checkpoint(self, user_id: int, platform: str) -> tuple[str, dict, str] | None:
+        """Turno guardado de este usuario: (fase, datos, fecha). None si no hay ninguno.
+
+        Fases: ``running`` (turno en curso o interrumpido por un reinicio) y
+        ``awaiting_approval`` (pausado esperando un sí/no del usuario).
+        """
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT phase, payload, updated_at FROM checkpoints WHERE id=?",
+                (f"{platform}:{user_id}",),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row[1])
+        except json.JSONDecodeError:
+            payload = {}
+        return row[0], payload if isinstance(payload, dict) else {}, row[2]

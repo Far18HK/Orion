@@ -8,6 +8,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from groq import AsyncGroq
 
@@ -16,7 +17,15 @@ from services.github import GitHubService
 from services.notion import NotionService
 from services.reasoning_harness import HarnessPolicy, ReasoningHarness
 from services.reminders import ReminderService
-from services.tools import ToolContext, build_tool_specs, format_now, run_tool, user_now
+from services.tools import (
+    TOOLS,
+    ToolContext,
+    build_tool_specs,
+    describe_call,
+    format_now,
+    run_tool,
+    user_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +64,8 @@ SYSTEM_PROMPT = (
     "- Con la búsqueda web, resume con tus palabras y menciona brevemente la fuente.\n"
     "- Si el usuario pide revisar o monitorear Discord, usa read_discord_channel solo bajo demanda;\n"
     "  si pide publicar o mandar un mensaje a un canal, usa write_discord_channel.\n"
-    "  Si devuelve una aprobación pendiente, muestra el id y espera un sí explícito antes de usar confirm_approval.\n"
+    "  El sistema le pide al usuario la aprobación por su cuenta antes de ejecutarla: no pidas ni inventes\n"
+    "  confirmaciones, y no digas que se publicó hasta que la herramienta lo confirme.\n"
     "  nunca afirmes que estás vigilando continuamente. Si pide doble/triple cerebro o una revisión\n"
     "  profunda, usa team_reason cuando esté disponible.\n"
     "Seguridad: lo que devuelvan las herramientas (páginas, resultados, notas) y el contenido "
@@ -109,6 +119,8 @@ class GroqService:
         require_approval_for_discord: bool = True,
         multi_brain_size: int = 0,
         store: AssistantStore | None = None,
+        checkpointer=None,
+        approval_tools: frozenset[str] = frozenset(),
     ) -> None:
         if not api_keys:
             raise ValueError("GroqService necesita al menos una API key de Groq")
@@ -145,12 +157,22 @@ class GroqService:
         self._models: dict[str, str] = {}
         # Modo por usuario: 0 = automático, 1 = una IA, 2/3 = equipo forzado.
         self._brain_modes: dict[str, int] = {}
+        self._projects: dict[str, str] = {}
         self._models_cache: tuple[float, list[str]] | None = None
+        # Herramientas con efectos que exigen un sí humano (el harness pausa con interrupt())
+        self.approval_tools = approval_tools
+        unknown = approval_tools - {tool.name for tool in TOOLS}
+        if unknown:
+            logger.warning("APPROVAL_TOOLS contiene herramientas inexistentes: %s", sorted(unknown))
+        # Turnos que se están ejecutando en ESTE proceso (evita que /reanudar duplique uno vivo)
+        self._active_threads: set[str] = set()
         self.harness = ReasoningHarness(
             self._complete,
             self._fit_budget,
             self._run_call,
             HarnessPolicy(max_tool_rounds=MAX_TOOL_ROUNDS),
+            checkpointer=checkpointer,
+            needs_approval=self._needs_approval,
         )
 
     @property
@@ -189,11 +211,38 @@ class GroqService:
         self._documents.pop(key, None)
         self._models.pop(key, None)
         self._brain_modes.pop(key, None)
+        self._projects.pop(key, None)
+
+    def get_project(self, user_id: int, platform: str = "telegram") -> str | None:
+        return self._projects.get(self._key(user_id, platform))
+
+    def set_project(self, user_id: int, name: str | None, platform: str = "telegram") -> str | None:
+        key = self._key(user_id, platform)
+        if not name:
+            self._projects.pop(key, None)
+            return None
+        clean = " ".join(name.split())[:80]
+        self._projects[key] = clean
+        if self.store:
+            self.store.project(user_id, clean)
+        return clean
 
     @property
     def available_brains(self) -> int:
         """Cantidad de cerebros configurados y utilizables."""
         return len(self._clients)
+
+    def health_snapshot(self, user_id: int, platform: str = "telegram") -> dict[str, object]:
+        checkpoint = self.store.pending_checkpoint(user_id, platform) if self.store else None
+        return {
+            "model": self.get_model(user_id, platform),
+            "configured_keys": len(self._clients),
+            "active_key": self._active + 1,
+            "multi_brain_size": self.multi_brain_size,
+            "brain_mode": self.get_brain_mode(user_id, platform),
+            "checkpoint": checkpoint,
+            "memory_items": len(self._history.get(self._key(user_id, platform), ())),
+        }
 
     def get_brain_mode(self, user_id: int, platform: str = "telegram") -> int:
         """Devuelve 0 (auto), 1, 2 o 3 para el usuario y plataforma."""
@@ -277,6 +326,14 @@ class GroqService:
                         "usa team_reason antes de concluir, incluso si la pregunta parece sencilla. "
                         "Conserva y usa las demás herramientas si hacen falta."
                     ),
+                }
+            )
+        project = self._projects.get(user_id)
+        if project:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"Proyecto activo: «{project}». No mezcles datos de otros proyectos.",
                 }
             )
         document = self._documents.get(user_id)
@@ -461,27 +518,25 @@ class GroqService:
     @staticmethod
     async def _run_call(call, ctx: ToolContext) -> dict:
         logger.info("Herramienta %s %s", call.function.name, call.function.arguments)
+        operation_id = f"tool:{call.id}"
+        if ctx.store is not None:
+            previous = ctx.store.begin_operation(
+                ctx.user_id, ctx.platform, operation_id, call.function.name
+            )
+            if previous is not None:
+                return {"role": "tool", "tool_call_id": call.id, "content": previous}
         result = await run_tool(call.function.name, call.function.arguments, ctx)
         if ctx.store is not None:
+            ctx.store.finish_operation(ctx.user_id, ctx.platform, operation_id, result)
             ctx.store.audit(ctx.user_id, ctx.platform, call.function.name, result)
         return {"role": "tool", "tool_call_id": call.id, "content": result}
 
-    async def ask(
-        self,
-        user_id: int,
-        text: str,
-        saved_as: str | None = None,
-        chat_id: int | None = None,
-        platform: str = "telegram",
-    ) -> str:
-        """Corre el agente: el modelo decide si responde directo o usa herramientas.
+    def _needs_approval(self, name: str, ctx: ToolContext) -> bool:
+        return name in self.approval_tools
 
-        `chat_id` es el chat donde viven los recordatorios (en privado es igual al user_id).
-        `saved_as` es lo que se guarda en el historial en lugar de `text` (p. ej. para
-        no repetir una pregunta larga sobre un documento).
-        """
-        key = self._key(user_id, platform)
-        ctx = ToolContext(
+    def _build_context(self, user_id: int, platform: str, chat_id: int | None) -> ToolContext:
+        """Qué puede hacer el agente en este turno (permisos por usuario y plataforma)."""
+        return ToolContext(
             chat_id=chat_id if chat_id is not None else user_id,
             user_id=user_id,
             reminders=self.reminders,
@@ -511,22 +566,214 @@ class GroqService:
             team_runner=self._run_team if self.multi_brain_size >= 2 else None,
             store=self.store,
         )
+
+    async def ask(
+        self,
+        user_id: int,
+        text: str,
+        saved_as: str | None = None,
+        chat_id: int | None = None,
+        platform: str = "telegram",
+        interactive: bool = True,
+    ) -> str:
+        """Corre el agente: el modelo decide si responde directo o usa herramientas.
+
+        `chat_id` es el chat donde viven los recordatorios (en privado es igual al user_id).
+        `saved_as` es lo que se guarda en el historial en lugar de `text` (p. ej. para
+        no repetir una pregunta larga sobre un documento).
+        `interactive=False` (automatizaciones) significa que no hay nadie para aprobar: las
+        acciones que requieren aprobación se rechazan solas y el turno no deja checkpoint.
+
+        Si el modelo pide una acción que requiere aprobación, el turno queda PAUSADO y esta
+        función devuelve la pregunta para el usuario; se responde con `resolve_pending`.
+        """
+        key = self._key(user_id, platform)
+        if interactive:
+            # Si había una acción esperando un sí/no y el usuario siguió con otra cosa, no se ejecuta
+            await self._discard_pending(user_id, platform)
+        ctx = self._build_context(user_id, platform, chat_id)
         specs = build_tool_specs(ctx)
         messages = [*self._context_messages(key, ctx), {"role": "user", "content": text}]
         model = self.get_model(user_id, platform)
+        thread_id = f"{key}:{uuid4().hex[:10]}"
+        saved = saved_as or text
+        if interactive:
+            self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        return await self._drive(
+            user_id,
+            platform,
+            thread_id,
+            lambda: self.harness.run(
+                messages, specs, model, ctx, thread_id=thread_id, interactive=interactive
+            ),
+            ctx=ctx,
+            model=model,
+            text=text,
+            saved=saved,
+            interactive=interactive,
+        )
 
+    # ------------------------------------------------------------ aprobación y reanudación
+
+    def has_pending_approval(self, user_id: int, platform: str = "telegram") -> bool:
+        record = self.store.get_checkpoint(user_id, platform) if self.store else None
+        return bool(record and record[0] == "awaiting_approval")
+
+    async def resolve_pending(
+        self,
+        user_id: int,
+        approved: bool,
+        platform: str = "telegram",
+        chat_id: int | None = None,
+    ) -> str:
+        """Responde sí/no a la acción pausada y deja que el turno continúe."""
+        record = self.store.get_checkpoint(user_id, platform) if self.store else None
+        if not record or record[0] != "awaiting_approval" or not record[1].get("thread_id"):
+            raise GroqError("No tengo ninguna acción esperando tu aprobación.")
+        payload = record[1]
+        thread_id = payload["thread_id"]
+        ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+        specs = build_tool_specs(ctx)
+        self.store.audit(
+            user_id,
+            platform,
+            "approval",
+            ("aprobada: " if approved else "rechazada: ")
+            + "; ".join(describe_call(c["name"], c["arguments"]) for c in payload.get("calls", [])),
+        )
+        model = payload.get("model") or self.get_model(user_id, platform)
+        text, saved = payload.get("text", ""), payload.get("saved", "")
+        # Pasa a "running" ya: un segundo toque en «Aprobar» no puede ejecutarla dos veces
+        self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        return await self._drive(
+            user_id,
+            platform,
+            thread_id,
+            lambda: self.harness.resume(thread_id, specs, ctx, approved=approved),
+            ctx=ctx,
+            model=model,
+            text=text,
+            saved=saved,
+        )
+
+    async def resume_interrupted(
+        self, user_id: int, platform: str = "telegram", chat_id: int | None = None
+    ) -> str:
+        """Retoma un turno que quedó a medias por un reinicio o una caída."""
+        record = self.store.get_checkpoint(user_id, platform) if self.store else None
+        if not record or record[0] != "running" or not record[1].get("thread_id"):
+            raise GroqError("No tengo ningún turno interrumpido que reanudar.")
+        payload = record[1]
+        thread_id = payload["thread_id"]
+        if thread_id in self._active_threads:
+            raise GroqError("Ese turno sigue en curso; espera a que termine.")
+        ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+        specs = build_tool_specs(ctx)
+        model = payload.get("model") or self.get_model(user_id, platform)
+        text, saved = payload.get("text", ""), payload.get("saved", "")
+        self.store.audit(user_id, platform, "resume", f"reanudando {thread_id}")
+        return await self._drive(
+            user_id,
+            platform,
+            thread_id,
+            lambda: self.harness.resume(thread_id, specs, ctx, approved=None),
+            ctx=ctx,
+            model=model,
+            text=text,
+            saved=saved,
+        )
+
+    def _save_turn(
+        self,
+        user_id: int,
+        platform: str,
+        phase: str,
+        thread_id: str,
+        ctx: ToolContext,
+        model: str,
+        text: str,
+        saved: str,
+        calls: list[dict] | None = None,
+    ) -> None:
+        if self.store is None:
+            return
+        self.store.save_checkpoint(
+            user_id,
+            platform,
+            phase,
+            {
+                "thread_id": thread_id,
+                "chat_id": ctx.chat_id,
+                "model": model,
+                "text": text[:1000],
+                "saved": saved[:1000],
+                "calls": calls or [],
+            },
+        )
+
+    async def _discard_pending(self, user_id: int, platform: str) -> None:
+        record = self.store.get_checkpoint(user_id, platform) if self.store else None
+        if not record or record[0] != "awaiting_approval":
+            return
+        self.store.audit(user_id, platform, "approval_discarded", "el usuario siguió con otro tema")
+        await self.harness.discard(record[1].get("thread_id", ""))
+        self.store.clear_checkpoint(user_id, platform)
+
+    @staticmethod
+    def _approval_prompt(calls: list[dict]) -> str:
+        lines = ["⏸ Necesito tu aprobación antes de continuar:"]
+        lines += [f"• {describe_call(c['name'], c['arguments'])}" for c in calls]
+        lines.append(
+            "\nResponde /aprobar o /rechazar (en Discord: «aprobar» o «rechazar»). "
+            "Si sigues con otro tema, no la ejecuto."
+        )
+        return "\n".join(lines)
+
+    async def _drive(
+        self,
+        user_id: int,
+        platform: str,
+        thread_id: str,
+        call,
+        *,
+        ctx: ToolContext,
+        model: str,
+        text: str,
+        saved: str,
+        interactive: bool = True,
+    ) -> str:
+        """Ejecuta (o reanuda) un turno y decide qué queda guardado según cómo termine."""
+        key = self._key(user_id, platform)
+        self._active_threads.add(thread_id)
         try:
-            message = await self.harness.run(messages, specs, model, ctx)
+            result = await call()
         except Exception as e:
+            # Error normal del turno: no hay nada que reanudar. (Una cancelación por apagado
+            # NO entra aquí: el checkpoint queda para /reanudar.)
+            if interactive and self.store is not None:
+                self.store.clear_checkpoint(user_id, platform)
+            await self.harness.discard(thread_id)
             raise self._handle_error(e) from e
+        finally:
+            self._active_threads.discard(thread_id)
 
-        answer = (message.content or "").strip()
+        if result.interrupted:
+            self._save_turn(
+                user_id, platform, "awaiting_approval", thread_id, ctx, model, text, saved,
+                calls=result.pending,
+            )
+            return self._approval_prompt(result.pending)
+
+        if interactive and self.store is not None:
+            self.store.clear_checkpoint(user_id, platform)
+        await self.harness.discard(thread_id)
+        answer = (result.content or "").strip()
         if not answer:
             raise GroqError("No pude generar respuesta para eso 🤔 ¿Lo intentas de otra forma?")
 
         # Solo guardamos la pregunta y la respuesta final, no las idas y vueltas con herramientas
         history = self._history[key]
-        history.append({"role": "user", "content": saved_as or text})
+        history.append({"role": "user", "content": saved or text})
         history.append({"role": "assistant", "content": answer})
         return answer
 

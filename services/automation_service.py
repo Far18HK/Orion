@@ -90,7 +90,10 @@ class AutomationService:
         user_id = automation["user_id"]
         instruction = automation["instruction"]
         try:
-            result = await self.ai.ask(user_id, instruction, chat_id=user_id, platform="telegram")
+            # interactive=False: nadie puede aprobar, así que las acciones sensibles se rechazan solas
+            result = await self.ai.ask(
+                user_id, instruction, chat_id=user_id, platform="telegram", interactive=False
+            )
             bot = Bot(token=self.telegram_token)
             try:
                 await bot.send_message(user_id, f"🤖 Automatización: {result[:4000]}")
