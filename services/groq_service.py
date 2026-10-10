@@ -37,6 +37,8 @@ SYSTEM_PROMPT = (
     "- Para analizar código de GitHub: empieza con github_repo_overview y github_list_files, lee "
     "solo los archivos relevantes con github_read_file y da conclusiones concretas citando "
     "archivo y línea. No inventes el contenido de archivos que no leíste; di cuáles revisaste.\n"
+    "  Si el usuario dice 'mi GitHub', 'mis repos' o no indica un repositorio concreto, usa primero "
+    "github_list_repos; no pidas un enlace antes de intentar listar sus repositorios.\n"
     "- Para dudas sobre hechos actuales (noticias, precios, resultados, versiones) busca antes "
     "de responder. En la charla normal, no uses herramientas.\n"
     "- Para cualquier cuenta no trivial usa calculate. Para fechas relativas ('el viernes', "
