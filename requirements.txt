@@ -12,3 +12,5 @@ tzdata>=2024.1
 discord.py>=2.4
 langgraph>=0.6,<1
 pydantic>=2.7,<3
+langgraph-checkpoint-sqlite>=2.0.10,<3
+aiosqlite>=0.20,<0.22

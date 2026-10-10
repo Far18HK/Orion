@@ -2,10 +2,12 @@
 import asyncio
 import logging
 
+import aiosqlite
 from aiogram import Bot, Dispatcher
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from config import load_settings
-from handlers import chat, documents, media, model, notes, reminders, start
+from config import load_settings, resolve_checkpoint_path
+from handlers import approvals, chat, documents, media, model, notes, reminders, start
 from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware, UserGuardMiddleware
 from services.github import GitHubService
@@ -14,6 +16,14 @@ from services.automation_service import AutomationService
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
+
+
+async def _open_checkpointer(path: str) -> tuple[AsyncSqliteSaver, aiosqlite.Connection]:
+    """Checkpointer nativo de LangGraph sobre SQLite: guarda cada paso de cada turno."""
+    conn = await aiosqlite.connect(path)
+    saver = AsyncSqliteSaver(conn)
+    await saver.setup()
+    return saver, conn
 
 
 async def main() -> None:
@@ -66,6 +76,10 @@ async def main() -> None:
     elif settings.github_token:
         logging.warning("GITHUB_TOKEN sin GITHUB_OWNER_IDS: GitHub deshabilitado (usa /id para ver tu id)")
 
+    checkpoint_path = resolve_checkpoint_path(settings.db_path)
+    logging.info("Checkpoints de LangGraph: %s", checkpoint_path)
+    checkpointer, checkpoint_conn = await _open_checkpointer(checkpoint_path)
+
     # El agente se crea al final porque sus herramientas usan recordatorios y Notion
     ai = GroqService(
         api_keys=settings.groq_api_keys,
@@ -84,6 +98,8 @@ async def main() -> None:
         require_approval_for_discord=settings.require_approval_for_discord,
         multi_brain_size=settings.multi_brain_size,
         store=assistant_store,
+        checkpointer=checkpointer,
+        approval_tools=settings.approval_tools,
     )
     dp["ai"] = ai
     automation_service = AutomationService(
@@ -99,6 +115,7 @@ async def main() -> None:
     dp.include_router(media.router)
     dp.include_router(documents.router)
     dp.include_router(model.router)
+    dp.include_router(approvals.router)
     dp.include_router(chat.router)
 
     # Menú de comandos (botón "/" en Telegram)
@@ -111,7 +128,10 @@ async def main() -> None:
     tasks = [dp.start_polling(bot)]
     if settings.discord_token:
         tasks.append(_run_discord(ai, settings))
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        await checkpoint_conn.close()
 
 
 async def _run_discord(ai: GroqService, settings) -> None:

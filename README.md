@@ -16,6 +16,8 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Modo multi-cerebro: 2 o 3 claves de Groq trabajan en paralelo y una sintetiza.
 - Memoria permanente, tareas, planes, automatizaciones registradas y auditoría en SQLite.
 - Harness de razonamiento con LangGraph y límites/validación de estado con Pydantic.
+- Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
+- Aprobación humana real (`/aprobar`, `/rechazar` o botones) para acciones con efectos, y `/reanudar` para retomar un turno interrumpido.
 
 ## Instalación local
 
@@ -58,13 +60,23 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Las pruebas actuales cubren el parser de recordatorios y sus errores más importantes.
+Las pruebas cubren el parser de recordatorios, el almacén SQLite y el harness (aprobación, rechazo, reanudación tras reinicio y turnos sin supervisión).
 
 ## Harness de razonamiento
 
 Orion usa LangGraph para orquestar cada turno: modelo, herramientas y respuesta final forman un flujo controlado con un máximo de rondas. Pydantic valida la política del harness para evitar límites inválidos. Telegram, Discord, Groq, Notion, GitHub y las herramientas existentes siguen siendo los adaptadores de la aplicación; el harness no reemplaza esos servicios.
 
-La persistencia de automatizaciones y memoria continúa en SQLite. El grafo actual controla el turno en ejecución; la reanudación de un turno interrumpido entre reinicios sigue dependiendo del estado de SQLite y es una mejora posterior, no una capacidad que se deba asumir automáticamente.
+La persistencia de automatizaciones y memoria continúa en SQLite.
+
+### Checkpoints y aprobación humana
+
+Cada paso de un turno (modelo → compuerta → herramientas) se guarda con el checkpointer nativo de LangGraph (`AsyncSqliteSaver`) en `orion_checkpoints.db`, junto a la base principal, así que vive en el mismo Volume de Railway.
+
+- **Aprobación (`interrupt()`).** Las herramientas de `APPROVAL_TOOLS` (por defecto `write_discord_channel` y `create_automation`) pausan el turno antes de ejecutarse. Orion te muestra qué quiere hacer y esperas tu `/aprobar` o `/rechazar` (en Discord, escribe `aprobar` o `rechazar`). La aprobación la da una persona, no el modelo: ya no depende de que el LLM se acuerde de pedirla. Si sigues con otro tema, la acción pendiente se descarta sin ejecutarse. Las automatizaciones corren sin nadie delante, así que ahí esas acciones se rechazan solas.
+- **Reanudar (`/reanudar`).** Si el bot se reinicia o cae a mitad de un turno, el último paso completado sigue guardado y `/reanudar` continúa desde ahí. No se reanuda solo, para que nada se ejecute sin que lo decidas. `/estado` muestra si hay algo pendiente.
+- **Idempotencia.** Los ids de las llamadas a herramientas ahora se guardan en el checkpoint, así que al reanudar una operación ya terminada devuelve su resultado guardado en vez de repetirse.
+
+`/estado` muestra el modelo, las claves configuradas, el modo de cerebro, la memoria reciente y si quedó un turno pendiente. `/proyecto Orion` activa un contexto de proyecto y `/proyecto off` lo desactiva.
 
 ## Seguridad
 

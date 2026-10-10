@@ -12,6 +12,9 @@ load_dotenv()  # Carga el archivo .env
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "reminders.db"
+CHECKPOINT_FILENAME = "orion_checkpoints.db"
+# Herramientas con efectos que piden un sí humano antes de ejecutarse (ver APPROVAL_TOOLS)
+DEFAULT_APPROVAL_TOOLS = "write_discord_channel,create_automation"
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class Settings:
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
+    approval_tools: frozenset[str]  # Herramientas que pausan el turno hasta que el usuario apruebe
 
 
 def resolve_db_path(env: Mapping[str, str]) -> str:
@@ -61,6 +65,13 @@ def resolve_db_path(env: Mapping[str, str]) -> str:
             "en cada deploy. Adjunta un Volume al servicio (o define DB_PATH)."
         )
     return DB_FILENAME
+
+
+def resolve_checkpoint_path(db_path: str) -> str:
+    """Base SQLite de los checkpoints de LangGraph: junto a la base principal, así que si esa
+    vive en un Volume persistente, los turnos pausados también sobreviven a los deploys."""
+    folder = os.path.dirname(db_path)
+    return os.path.join(folder, CHECKPOINT_FILENAME) if folder else CHECKPOINT_FILENAME
 
 
 def check_db_dir(path: str) -> None:
@@ -117,6 +128,13 @@ def load_settings() -> Settings:
     daily_message_limit = max(int(os.getenv("DAILY_MESSAGE_LIMIT", "0")), 0)
     require_approval_for_discord = os.getenv("REQUIRE_APPROVAL_FOR_DISCORD", "true").lower() not in {"0", "false", "no"}
     automations_enabled = os.getenv("AUTOMATIONS_ENABLED", "true").lower() not in {"0", "false", "no"}
+    approval_tools = frozenset(
+        name.strip()
+        for name in os.getenv("APPROVAL_TOOLS", DEFAULT_APPROVAL_TOOLS).split(",")
+        if name.strip()
+    )
+    if not require_approval_for_discord:  # compatibilidad con la variable anterior
+        approval_tools -= {"write_discord_channel"}
 
     timezone = os.getenv("TIMEZONE") or None
     if timezone:
@@ -186,4 +204,5 @@ def load_settings() -> Settings:
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,
+        approval_tools=approval_tools,
     )

@@ -19,7 +19,9 @@ DISCORD_LIMIT = 2000  # Máximo de caracteres por mensaje en Discord
 HELP_TEXT = (
     "Soy tu asistente. Escríbeme normal (en servidores, mencióname) y yo decido qué herramienta "
     "usar: buscar en internet, leer enlaces, recordatorios, notas, calculadora, clima, hora y GitHub.\n"
-    "Comandos: `id` (tu id de Discord), `reset` (borra la memoria de la conversación), `ayuda`."
+    "Comandos: `id` (tu id de Discord), `reset` (borra la memoria de la conversación), `ayuda`.\n"
+    "Si pido tu aprobación para algo, responde `aprobar` o `rechazar`; `reanudar` retoma un turno "
+    "que quedó a medias tras un reinicio."
 )
 
 
@@ -83,9 +85,21 @@ class DiscordFront(discord.Client):
 
         async with message.channel.typing():
             try:
-                answer = await self.ai.ask(
-                    message.author.id, text, chat_id=message.channel.id, platform="discord"
-                )
+                if command in ("aprobar", "rechazar"):
+                    answer = await self.ai.resolve_pending(
+                        message.author.id,
+                        command == "aprobar",
+                        platform="discord",
+                        chat_id=message.channel.id,
+                    )
+                elif command == "reanudar":
+                    answer = await self.ai.resume_interrupted(
+                        message.author.id, platform="discord", chat_id=message.channel.id
+                    )
+                else:
+                    answer = await self.ai.ask(
+                        message.author.id, text, chat_id=message.channel.id, platform="discord"
+                    )
             except GroqError as e:
                 await message.reply(str(e))
                 return
