@@ -18,6 +18,7 @@ COMMANDS = [
     ("buscarnota", "Busca notas por texto o #etiqueta"),
     ("cerrardoc", "Olvida el documento que me enviaste"),
     ("modelo", "Ve o cambia el modelo de IA"),
+    ("cerebro", "Cambia entre auto, 1, 2 o 3 cerebros"),
     ("reset", "Borra la memoria de esta conversación"),
 ]
 BOT_COMMANDS = [BotCommand(command=name, description=desc) for name, desc in COMMANDS]
