@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from openai import AsyncOpenAI
 from groq import AsyncGroq
 
 from services.assistant_store import AssistantStore
@@ -87,9 +88,7 @@ MAX_PROMPT_TOKENS = 5500
 CHARS_PER_TOKEN = 3  # Estimación conservadora para español y código
 OLD_RESULT_CHARS = 300  # Cuánto queda de un resultado de herramienta viejo al recortarlo
 RETRY_WAIT_MAX = 20  # Segundos máximos que esperamos un 429 antes de reintentar
-MAX_TOOL_ROUNDS = (
-    8  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
-)
+MAX_TOOL_ROUNDS = 3  # Menos rondas = menor latencia; las herramientas paralelas siguen disponibles.
 
 
 class GroqError(Exception):
@@ -106,6 +105,9 @@ class GroqService:
         api_keys: Sequence[str],
         model: str,
         max_history: int,
+        groq_model: str | None = None,
+        openrouter_api_key: str | None = None,
+        openrouter_model: str = "openai/gpt-oss-20b",
         reminders: ReminderService | None = None,
         notion: NotionService | None = None,
         github: GitHubService | None = None,
@@ -131,6 +133,17 @@ class GroqService:
         self._active = 0
         self._active_reset_day = datetime.now(timezone.utc).date()
         self.model = model
+        self.groq_model = groq_model or model
+        self._openrouter_model = openrouter_model
+        self._openrouter = (
+            AsyncOpenAI(
+                api_key=openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                default_headers={"X-Title": "Orion"},
+            )
+            if openrouter_api_key
+            else None
+        )
         # Servicios a los que el agente puede llegar mediante herramientas
         self.reminders = reminders
         self.notion = notion
@@ -176,8 +189,10 @@ class GroqService:
         )
 
     @property
-    def client(self) -> AsyncGroq:
-        """Cliente de la cuenta activa (la que se usa en la próxima petición)."""
+    def client(self):
+        """Cliente del proveedor principal de texto (OpenRouter si está configurado)."""
+        if self._openrouter is not None:
+            return self._openrouter
         return self._clients[self._active]
 
     def _reset_active_client_if_new_day(self) -> None:
@@ -390,6 +405,23 @@ class GroqService:
             return 5.0
 
     async def _complete(self, model: str, messages: list[dict], tools: list[dict] | None):
+        """Completa texto con OpenRouter y cae a Groq si OpenRouter falla."""
+        if self._openrouter is not None:
+            try:
+                kwargs = {"model": model, "messages": messages, "temperature": 0.6}
+                if tools:
+                    kwargs["tools"] = tools
+                    kwargs["tool_choice"] = "auto"
+                return await self._openrouter.chat.completions.create(**kwargs)
+            except Exception as e:  # noqa: BLE001 - el fallback evita dejar al usuario sin respuesta
+                logger.warning("OpenRouter falló; uso Groq como fallback: %s", e)
+                return await self._complete_groq(self.groq_model, messages, tools)
+        return await self._complete_groq(model, messages, tools)
+
+    async def _complete_groq(
+        self, model: str, messages: list[dict], tools: list[dict] | None
+    ):
+        """Completa texto en Groq, incluyendo rotación de claves y reintentos existentes."""
         self._reset_active_client_if_new_day()
         kwargs = {"model": model, "messages": messages, "temperature": 0.6}
         if tools:
@@ -400,7 +432,7 @@ class GroqService:
         max_attempts = 3 + (len(self._clients) - 1)
         for attempt in range(max_attempts):
             try:
-                return await self.client.chat.completions.create(**kwargs)
+                return await self._clients[self._active].chat.completions.create(**kwargs)
             except Exception as e:
                 status = getattr(e, "status_code", None)
                 last = attempt == max_attempts - 1
@@ -456,7 +488,7 @@ class GroqService:
 
         async def ask_analyst(index: int, role: str) -> str:
             response = await self._clients[index].chat.completions.create(
-                model=self.model,
+                model=self.groq_model,
                 messages=[
                     {"role": "system", "content": role + " Responde en español y sé conciso."},
                     {"role": "user", "content": task},
@@ -475,7 +507,7 @@ class GroqService:
                 for index, analysis in enumerate(analyses)
             )
             synthesis = await self._clients[analyst_count].chat.completions.create(
-                model=self.model,
+                model=self.groq_model,
                 messages=[
                     {
                         "role": "system",
@@ -828,7 +860,7 @@ class GroqService:
         response = None
         for attempt in range(3 + len(self._clients) - 1):
             try:
-                response = await self.client.chat.completions.create(
+                response = await self._clients[self._active].chat.completions.create(
                     model=VISION_MODEL, messages=messages, temperature=0.8
                 )
                 break
@@ -862,7 +894,7 @@ class GroqService:
         response = None
         for attempt in range(3 + len(self._clients) - 1):
             try:
-                response = await self.client.audio.transcriptions.create(
+                response = await self._clients[self._active].audio.transcriptions.create(
                     file=(filename, audio_bytes),
                     model=AUDIO_MODEL,
                 )
