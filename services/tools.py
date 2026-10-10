@@ -28,6 +28,7 @@ from services.discord_monitor import (
     send_channel_message,
 )
 from services.assistant_store import AssistantStore
+from services.automation_service import next_run_for
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderError, ReminderService
@@ -656,8 +657,11 @@ async def _t_create_automation(ctx: ToolContext, args: dict) -> str:
     schedule = str(args.get("schedule", "")).strip()
     if not instruction or not schedule:
         return "Error: indica la instrucción y el horario."
-    item_id = ctx.store.add_automation(ctx.user_id, instruction, schedule)
-    return f"Automatización registrada con id {item_id}. Requiere conectar el scheduler para ejecutarse."
+    first_run = next_run_for(schedule)
+    if first_run is None:
+        return "Error: usa un horario como 'cada 30m', 'cada 2 horas' o 'cada día 08:00'."
+    item_id = ctx.store.add_automation(ctx.user_id, instruction, schedule, first_run)
+    return f"Automatización registrada con id {item_id}. La revisaré según {schedule}."
 
 
 async def _t_audit(ctx: ToolContext, args: dict) -> str:
