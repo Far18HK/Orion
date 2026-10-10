@@ -83,8 +83,11 @@ async def main() -> None:
     # El agente se crea al final porque sus herramientas usan recordatorios y Notion
     ai = GroqService(
         api_keys=settings.groq_api_keys,
-        model=settings.groq_model,
+        model=settings.openrouter_model if settings.openrouter_api_key else settings.groq_model,
         max_history=settings.max_history,
+        groq_model=settings.groq_model,
+        openrouter_api_key=settings.openrouter_api_key,
+        openrouter_model=settings.openrouter_model,
         reminders=reminder_service,
         notion=dp["notion"],
         github=github,
@@ -123,7 +126,9 @@ async def main() -> None:
 
     # Ignora mensajes acumulados mientras el bot estuvo apagado
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Bot iniciado con el modelo %s (Groq)", settings.groq_model)
+    provider = "OpenRouter" if settings.openrouter_api_key else "Groq"
+    active_model = settings.openrouter_model if settings.openrouter_api_key else settings.groq_model
+    logging.info("Bot iniciado con el modelo %s (%s)", active_model, provider)
 
     tasks = [dp.start_polling(bot)]
     if settings.discord_token:

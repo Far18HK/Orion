@@ -14,6 +14,7 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Análisis de repositorios GitHub en modo solo lectura y con lista blanca.
 - Lectura bajo demanda de canales autorizados de Discord.
 - Modo multi-cerebro: 2 o 3 claves de Groq trabajan en paralelo y una sintetiza.
+- OpenRouter como proveedor principal opcional para texto, con fallback automático a Groq.
 - Memoria permanente, tareas, planes, automatizaciones registradas y auditoría en SQLite.
 - Harness de razonamiento con LangGraph y límites/validación de estado con Pydantic.
 - Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
@@ -36,6 +37,10 @@ Consulta `.env.example`. Las variables mínimas son:
 
 - `TELEGRAM_TOKEN`: token creado con BotFather.
 - `GROQ_API_KEY` o `GROQ_API_KEYS`: una o varias claves de Groq.
+
+Si defines `OPENROUTER_API_KEY`, Orion usa OpenRouter para chat y herramientas de texto. Groq se
+mantiene para visión, transcripción de audio y como fallback si OpenRouter falla. El modelo
+predeterminado es `meta-llama/llama-3.3-70b-instruct:free`; puedes cambiarlo con `OPENROUTER_MODEL`.
 
 Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura también `DAILY_MESSAGE_LIMIT` para proteger la cuota de Groq.
 

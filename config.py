@@ -22,6 +22,8 @@ class Settings:
     telegram_token: str
     groq_api_keys: tuple[str, ...]  # Una o varias; si una cuenta agota su cuota diaria, pasa a la siguiente
     groq_model: str
+    openrouter_api_key: str | None
+    openrouter_model: str
     multi_brain_size: int  # 0 = desactivado; 2 o 3 claves para análisis sincronizado
     max_history: int  # Cantidad de mensajes que recuerda (pregunta + respuesta cuentan por separado)
     notion_token: str | None
@@ -107,11 +109,13 @@ def load_settings() -> Settings:
         )
 
     # Forzamos número par para que el historial siempre quede en pares usuario/modelo
-    max_history = int(os.getenv("MAX_HISTORY", "20"))
+    max_history = int(os.getenv("MAX_HISTORY", "8"))
     max_history -= max_history % 2
     multi_brain_size = min(max(int(os.getenv("MULTI_BRAIN_SIZE", "0")), 0), 3)
     if multi_brain_size == 1:
         multi_brain_size = 0
+
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or None
 
     # Notion es opcional: si no se configura, el comando /nota avisa en vez de fallar
     notion_token = os.getenv("NOTION_TOKEN") or None
@@ -184,6 +188,10 @@ def load_settings() -> Settings:
         telegram_token=token,
         groq_api_keys=groq_api_keys,
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        openrouter_api_key=openrouter_api_key,
+        openrouter_model=os.getenv(
+            "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
+        ),
         multi_brain_size=multi_brain_size,
         max_history=max(max_history, 2),
         notion_token=notion_token,
