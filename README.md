@@ -15,6 +15,7 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Lectura bajo demanda de canales autorizados de Discord.
 - Modo multi-cerebro: 2 o 3 claves de Groq trabajan en paralelo y una sintetiza.
 - Memoria permanente, tareas, planes, automatizaciones registradas y auditoría en SQLite.
+- Harness de razonamiento con LangGraph y límites/validación de estado con Pydantic.
 
 ## Instalación local
 
@@ -58,6 +59,12 @@ python -m pytest -q
 ```
 
 Las pruebas actuales cubren el parser de recordatorios y sus errores más importantes.
+
+## Harness de razonamiento
+
+Orion usa LangGraph para orquestar cada turno: modelo, herramientas y respuesta final forman un flujo controlado con un máximo de rondas. Pydantic valida la política del harness para evitar límites inválidos. Telegram, Discord, Groq, Notion, GitHub y las herramientas existentes siguen siendo los adaptadores de la aplicación; el harness no reemplaza esos servicios.
+
+La persistencia de automatizaciones y memoria continúa en SQLite. El grafo actual controla el turno en ejecución; la reanudación de un turno interrumpido entre reinicios sigue dependiendo del estado de SQLite y es una mejora posterior, no una capacidad que se deba asumir automáticamente.
 
 ## Seguridad
 
