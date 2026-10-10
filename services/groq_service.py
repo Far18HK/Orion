@@ -1,4 +1,5 @@
 """Servicio que habla con Groq (modelos Llama) y guarda el contexto de cada usuario."""
+
 import asyncio
 import base64
 import json
@@ -10,9 +11,10 @@ from datetime import datetime, timezone
 
 from groq import AsyncGroq
 
-from services.github import GitHubService
 from services.assistant_store import AssistantStore
+from services.github import GitHubService
 from services.notion import NotionService
+from services.reasoning_harness import HarnessPolicy, ReasoningHarness
 from services.reminders import ReminderService
 from services.tools import ToolContext, build_tool_specs, format_now, run_tool, user_now
 
@@ -75,7 +77,9 @@ MAX_PROMPT_TOKENS = 5500
 CHARS_PER_TOKEN = 3  # Estimación conservadora para español y código
 OLD_RESULT_CHARS = 300  # Cuánto queda de un resultado de herramienta viejo al recortarlo
 RETRY_WAIT_MAX = 20  # Segundos máximos que esperamos un 429 antes de reintentar
-MAX_TOOL_ROUNDS = 8  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
+MAX_TOOL_ROUNDS = (
+    8  # Vueltas máximas de herramientas por respuesta (cada vuelta puede traer varias llamadas)
+)
 
 
 class GroqError(Exception):
@@ -142,6 +146,12 @@ class GroqService:
         # Modo por usuario: 0 = automático, 1 = una IA, 2/3 = equipo forzado.
         self._brain_modes: dict[str, int] = {}
         self._models_cache: tuple[float, list[str]] | None = None
+        self.harness = ReasoningHarness(
+            self._complete,
+            self._fit_budget,
+            self._run_call,
+            HarnessPolicy(max_tool_rounds=MAX_TOOL_ROUNDS),
+        )
 
     @property
     def client(self) -> AsyncGroq:
@@ -248,7 +258,9 @@ class GroqService:
     def _context_messages(self, user_id: int, ctx: ToolContext) -> list[dict]:
         """System prompt (con fecha y hora del usuario), documento cargado e historial."""
         now, known_tz = user_now(ctx)
-        zone = now.tzinfo.key if known_tz else "UTC; el usuario aún no ha configurado su zona horaria"  # type: ignore[union-attr]
+        zone = (
+            now.tzinfo.key if known_tz else "UTC; el usuario aún no ha configurado su zona horaria"
+        )  # type: ignore[union-attr]
         messages: list[dict] = [
             {
                 "role": "system",
@@ -300,14 +312,15 @@ class GroqService:
         limit = last_assistant if keep_latest_round else len(messages)
         for i, m in enumerate(messages[:limit]):
             if m["role"] == "tool" and len(m["content"]) > OLD_RESULT_CHARS + 40:
-                m["content"] = m["content"][:OLD_RESULT_CHARS] + " […recortado para ahorrar espacio]"
+                m["content"] = (
+                    m["content"][:OLD_RESULT_CHARS] + " […recortado para ahorrar espacio]"
+                )
                 return True
         return False
 
     def _fit_budget(self, messages: list[dict], tools: list[dict] | None) -> None:
-        while (
-            self._estimate_tokens(messages, tools) > MAX_PROMPT_TOKENS
-            and self._shrink_one(messages)
+        while self._estimate_tokens(messages, tools) > MAX_PROMPT_TOKENS and self._shrink_one(
+            messages
         ):
             pass
 
@@ -335,23 +348,34 @@ class GroqService:
                 status = getattr(e, "status_code", None)
                 last = attempt == max_attempts - 1
                 has_tool_history = any(m["role"] == "tool" for m in messages)
-                if status == 429 and self._is_daily_token_limit(e) and self._active + 1 < len(self._clients):
+                if (
+                    status == 429
+                    and self._is_daily_token_limit(e)
+                    and self._active + 1 < len(self._clients)
+                ):
                     # Esta cuenta agotó su cuota diaria (no se arregla esperando): paso a la
                     # siguiente YA, sin dormir, y sigo la MISMA conversación con el mismo historial.
                     self._active += 1
                     logger.warning(
                         "Cuenta Groq #%s agotó su cuota diaria (TPD); paso a la cuenta #%s",
-                        self._active, self._active + 1,
+                        self._active,
+                        self._active + 1,
                     )
                 elif status == 400 and "tool_use_failed" in str(e) and not last:
                     # El modelo armó mal la llamada a una herramienta: es aleatorio, otro intento suele salir bien
                     logger.warning("tool_use_failed, reintento (%s)", attempt + 1)
                 elif status == 400 and "tools" in kwargs and not has_tool_history:
                     # Un 400 en la primera llamada suele ser un modelo sin soporte de herramientas
-                    logger.warning("El modelo %s rechazó las herramientas; reintento sin ellas", model)
+                    logger.warning(
+                        "El modelo %s rechazó las herramientas; reintento sin ellas", model
+                    )
                     kwargs.pop("tools")
                     kwargs.pop("tool_choice")
-                elif status == 413 and not last and self._shrink_one(messages, keep_latest_round=False):
+                elif (
+                    status == 413
+                    and not last
+                    and self._shrink_one(messages, keep_latest_round=False)
+                ):
                     # Petición demasiado grande para la cuota: recortamos resultados viejos y reintentamos
                     logger.warning("413 de Groq: recorto resultados de herramientas y reintento")
                     while self._shrink_one(messages, keep_latest_round=False):
@@ -430,7 +454,9 @@ class GroqService:
                 {"role": "user", "content": task},
             ],
         )
-        return (response.choices[0].message.content or "").strip() or "No pude generar una respuesta."
+        return (
+            response.choices[0].message.content or ""
+        ).strip() or "No pude generar una respuesta."
 
     @staticmethod
     async def _run_call(call, ctx: ToolContext) -> dict:
@@ -461,7 +487,9 @@ class GroqService:
             reminders=self.reminders,
             notion=self.notion,
             # GitHub privado solo se habilita para ids de Telegram explícitamente autorizados.
-            github=self.github if platform == "telegram" and user_id in self.github_user_ids else None,
+            github=self.github
+            if platform == "telegram" and user_id in self.github_user_ids
+            else None,
             platform=platform,
             discord_token=(
                 self.discord_token
@@ -488,36 +516,7 @@ class GroqService:
         model = self.get_model(user_id, platform)
 
         try:
-            # En la última vuelta no se ofrecen herramientas: obliga al modelo a responder
-            for round_number in range(MAX_TOOL_ROUNDS + 1):
-                round_tools = specs if round_number < MAX_TOOL_ROUNDS else None
-                self._fit_budget(messages, round_tools)
-                response = await self._complete(model, messages, tools=round_tools)
-                message = response.choices[0].message
-                if not message.tool_calls:
-                    break
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.function.name,
-                                    "arguments": call.function.arguments,
-                                },
-                            }
-                            for call in message.tool_calls
-                        ],
-                    }
-                )
-                # Las llamadas de una misma vuelta son independientes: van en paralelo
-                messages.extend(
-                    await asyncio.gather(*(self._run_call(c, ctx) for c in message.tool_calls))
-                )
+            message = await self.harness.run(messages, specs, model, ctx)
         except Exception as e:
             raise self._handle_error(e) from e
 
