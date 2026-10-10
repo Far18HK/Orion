@@ -35,6 +35,7 @@ class Settings:
     discord_monitor_channel_ids: frozenset[int]  # Canales de Discord que se pueden consultar
     discord_write_channel_ids: frozenset[int]  # Canales de Discord donde se puede escribir
     require_approval_for_discord: bool
+    automations_enabled: bool
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
@@ -115,6 +116,7 @@ def load_settings() -> Settings:
         raise RuntimeError("ALLOWED_USER_IDS debe ser una lista de números: 123456,789012") from None
     daily_message_limit = max(int(os.getenv("DAILY_MESSAGE_LIMIT", "0")), 0)
     require_approval_for_discord = os.getenv("REQUIRE_APPROVAL_FOR_DISCORD", "true").lower() not in {"0", "false", "no"}
+    automations_enabled = os.getenv("AUTOMATIONS_ENABLED", "true").lower() not in {"0", "false", "no"}
 
     timezone = os.getenv("TIMEZONE") or None
     if timezone:
@@ -180,6 +182,7 @@ def load_settings() -> Settings:
         discord_monitor_channel_ids=discord_monitor_channel_ids,
         discord_write_channel_ids=discord_write_channel_ids,
         require_approval_for_discord=require_approval_for_discord,
+        automations_enabled=automations_enabled,
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,

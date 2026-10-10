@@ -44,7 +44,7 @@ Para permitir que publique mensajes, configura además `DISCORD_WRITE_CHANNEL_ID
 
 Para activar el modo multi-cerebro, define `GROQ_API_KEYS` con 2 o 3 claves de cuentas distintas y `MULTI_BRAIN_SIZE=2` o `MULTI_BRAIN_SIZE=3`. El agente usará `team_reason` cuando pidas una segunda opinión, una revisión profunda o "doble/triple cerebro". Esto consume una llamada por analista y una llamada final de síntesis.
 
-Funciones autónomas disponibles: `remember`/`recall`/`forget` para memoria, `create_task`/`list_tasks`/`complete_task` para tareas, `plan_task` para descomponer objetivos y `audit_log` para consultar acciones. `create_automation` registra la instrucción y frecuencia; su ejecución requiere conectar el scheduler persistente en la siguiente fase.
+Funciones autónomas disponibles: `remember`/`recall`/`forget` para memoria, `create_task`/`list_tasks`/`complete_task` para tareas, `plan_task` para descomponer objetivos y `audit_log` para consultar acciones. `create_automation` registra y ejecuta instrucciones con frecuencias de intervalo como `cada 30m`, `cada 2h` o `cada 1d`; las ejecuciones sobreviven a reinicios porque su estado queda en SQLite.
 
 ## Railway
 

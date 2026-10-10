@@ -10,6 +10,7 @@ from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware, UserGuardMiddleware
 from services.github import GitHubService
 from services.assistant_store import AssistantStore
+from services.automation_service import AutomationService
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
@@ -85,6 +86,11 @@ async def main() -> None:
         store=assistant_store,
     )
     dp["ai"] = ai
+    automation_service = AutomationService(
+        assistant_store, settings.telegram_token, ai, enabled=settings.automations_enabled
+    )
+    automation_service.start()
+    dp["automations"] = automation_service
 
     # El orden importa: chat va ÚLTIMO porque atrapa cualquier mensaje de texto restante
     dp.include_router(start.router)
