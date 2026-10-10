@@ -39,6 +39,8 @@ SYSTEM_PROMPT = (
     "archivo y línea. No inventes el contenido de archivos que no leíste; di cuáles revisaste.\n"
     "  Si el usuario dice 'mi GitHub', 'mis repos' o no indica un repositorio concreto, usa primero "
     "github_list_repos; no pidas un enlace antes de intentar listar sus repositorios.\n"
+    "  Si no tienes herramientas de GitHub disponibles, dilo claramente: falta configurar GITHUB_TOKEN "
+    "y GITHUB_OWNER_IDS. No pidas al usuario su enlace o usuario como si eso activara el acceso.\n"
     "- Para dudas sobre hechos actuales (noticias, precios, resultados, versiones) busca antes "
     "de responder. En la charla normal, no uses herramientas.\n"
     "- Para cualquier cuenta no trivial usa calculate. Para fechas relativas ('el viernes', "
@@ -137,6 +139,8 @@ class GroqService:
         self._documents: dict[str, tuple[str, str]] = {}
         # Modelo elegido con /modelo por usuario (si no hay, se usa el predeterminado)
         self._models: dict[str, str] = {}
+        # Modo por usuario: 0 = automático, 1 = una IA, 2/3 = equipo forzado.
+        self._brain_modes: dict[str, int] = {}
         self._models_cache: tuple[float, list[str]] | None = None
 
     @property
@@ -174,6 +178,28 @@ class GroqService:
         self._history.pop(key, None)
         self._documents.pop(key, None)
         self._models.pop(key, None)
+        self._brain_modes.pop(key, None)
+
+    @property
+    def available_brains(self) -> int:
+        """Cantidad de cerebros configurados y utilizables."""
+        return len(self._clients)
+
+    def get_brain_mode(self, user_id: int, platform: str = "telegram") -> int:
+        """Devuelve 0 (auto), 1, 2 o 3 para el usuario y plataforma."""
+        return self._brain_modes.get(self._key(user_id, platform), 0)
+
+    def set_brain_mode(self, user_id: int, mode: int, platform: str = "telegram") -> int:
+        """Cambia el modo; 0 significa que Orion decide automáticamente."""
+        if mode not in (0, 1, 2, 3):
+            raise GroqError("Elige auto, 1, 2 o 3.")
+        if mode > 1 and mode > self.multi_brain_size:
+            raise GroqError(
+                f"El modo {mode} necesita {mode} API keys y MULTI_BRAIN_SIZE={mode}. "
+                f"Ahora solo hay {self.available_brains} key(s) y el equipo está en {self.multi_brain_size}."
+            )
+        self._brain_modes[self._key(user_id, platform)] = mode
+        return mode
 
     def clear_document(self, user_id: int, platform: str = "telegram") -> bool:
         """Olvida el documento cargado."""
@@ -229,6 +255,18 @@ class GroqService:
                 "content": f"{SYSTEM_PROMPT}\nAhora es {format_now(now)} (zona: {zone}).",
             }
         ]
+        brain_mode = self._brain_modes.get(user_id, 0)
+        if brain_mode >= 2:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"El usuario ha elegido modo {brain_mode} cerebros. Para esta respuesta, "
+                        "usa team_reason antes de concluir, incluso si la pregunta parece sencilla. "
+                        "Conserva y usa las demás herramientas si hacen falta."
+                    ),
+                }
+            )
         document = self._documents.get(user_id)
         if document:
             name, text = document
@@ -375,7 +413,24 @@ class GroqService:
             return answer or "El equipo no generó una respuesta final."
         except Exception as e:
             logger.exception("Falló el modo multi-cerebro")
+            if self._is_daily_token_limit(e):
+                logger.warning("Un cerebro agotó su cuota; vuelvo temporalmente a una sola IA")
+                return await self._single_brain_answer(task)
             raise self._handle_error(e) from e
+
+    async def _single_brain_answer(self, task: str) -> str:
+        """Fallback para no dejar al usuario sin respuesta si falla un analista."""
+        response = await self._complete(
+            self.model,
+            [
+                {
+                    "role": "system",
+                    "content": "Responde en español, con claridad y de forma concisa.",
+                },
+                {"role": "user", "content": task},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip() or "No pude generar una respuesta."
 
     @staticmethod
     async def _run_call(call, ctx: ToolContext) -> dict:
