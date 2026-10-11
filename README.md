@@ -42,6 +42,10 @@ Si defines `OPENROUTER_API_KEY`, Orion usa OpenRouter para chat y herramientas d
 mantiene para visión, transcripción de audio y como fallback si OpenRouter falla. El modelo
 predeterminado es `nvidia/nemotron-3-super-120b-a12b:free`; puedes cambiarlo con `OPENROUTER_MODEL`.
 
+Orión usa un tono informal, sarcástico y realista, y conserva en SQLite los turnos finales de
+conversación, las memorias que el usuario le pide guardar y el proyecto activo. Para que esa
+memoria sobreviva despliegues en Railway, usa un Volume persistente.
+
 Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura también `DAILY_MESSAGE_LIMIT` para proteger la cuota de Groq.
 
 `DISCORD_DM_IDS` debe contener los IDs de Discord autorizados a recibir mensajes directos. En Discord, escribe `id` al bot para obtener tu ID.
