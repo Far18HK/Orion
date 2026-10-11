@@ -1,5 +1,6 @@
 """Handler principal: cualquier texto se envía al proveedor activo."""
 import asyncio
+import logging
 
 from aiogram import Router
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -57,6 +58,14 @@ async def chat_with_ai(message: Message, ai: GroqService) -> None:
             if not request.done():
                 request.cancel()
             await message.answer(str(e))
+            return
+        except Exception:
+            # Red de seguridad: GroqService ya traduce sus errores a GroqError, pero si algo
+            # inesperado se escapa de todas formas, el usuario nunca debe quedarse sin respuesta.
+            if not request.done():
+                request.cancel()
+            logging.exception("Fallo inesperado respondiendo al mensaje")
+            await message.answer("Algo se rompió por mi lado 🔧 Intenta otra vez en un momento.")
             return
         finally:
             if not progress.done():

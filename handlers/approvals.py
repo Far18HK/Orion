@@ -4,6 +4,7 @@ Cuando el agente quiere hacer algo sensible (publicar en Discord, crear una auto
 el turno se PAUSA y Orion pregunta. Aquí se responde: botones, /aprobar o /rechazar.
 Si el bot se reinició a mitad de un turno, /reanudar lo retoma desde el último paso guardado.
 """
+import logging
 from contextlib import suppress
 
 from aiogram import F, Router
@@ -23,6 +24,10 @@ async def _resolve(message: Message, user_id: int, ai: GroqService, approved: bo
             answer = await ai.resolve_pending(user_id, approved, chat_id=message.chat.id)
         except GroqError as e:
             await message.answer(str(e))
+            return
+        except Exception:
+            logging.exception("Fallo inesperado resolviendo una aprobación")
+            await message.answer("Algo se rompió por mi lado 🔧 Intenta otra vez en un momento.")
             return
     await send_answer(message, ai, user_id, answer)
 
@@ -48,6 +53,10 @@ async def cmd_reanudar(message: Message, ai: GroqService) -> None:
             answer = await ai.resume_interrupted(message.from_user.id, chat_id=message.chat.id)
         except GroqError as e:
             await message.answer(str(e))
+            return
+        except Exception:
+            logging.exception("Fallo inesperado reanudando un turno")
+            await message.answer("Algo se rompió por mi lado 🔧 Intenta otra vez en un momento.")
             return
     await send_answer(message, ai, message.from_user.id, answer)
 
