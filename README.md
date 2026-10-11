@@ -40,7 +40,7 @@ Consulta `.env.example`. Las variables mínimas son:
 
 Si defines `OPENROUTER_API_KEY`, Orion usa OpenRouter para chat y herramientas de texto. Groq se
 mantiene para visión, transcripción de audio y como fallback si OpenRouter falla. El modelo
-predeterminado es `meta-llama/llama-3.3-70b-instruct:free`; puedes cambiarlo con `OPENROUTER_MODEL`.
+predeterminado es `nvidia/nemotron-3-super-120b-a12b:free`; puedes cambiarlo con `OPENROUTER_MODEL`.
 
 Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura también `DAILY_MESSAGE_LIMIT` para proteger la cuota de Groq.
 

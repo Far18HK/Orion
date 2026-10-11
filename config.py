@@ -190,7 +190,7 @@ def load_settings() -> Settings:
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         openrouter_api_key=openrouter_api_key,
         openrouter_model=os.getenv(
-            "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
+            "OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
         ),
         multi_brain_size=multi_brain_size,
         max_history=max(max_history, 2),

@@ -9,6 +9,10 @@
 
 OpenRouter será el proveedor principal para chat y herramientas de texto. Groq quedará como respaldo automático y seguirá procesando imágenes y audios.
 
+La variante gratuita de Nemotron puede dejar de estar disponible sin aviso. Si OpenRouter
+responde que el modelo no existe o no está disponible, Orion lo detecta, deja de repetir la
+solicitud durante ese proceso y usa Groq como fallback.
+
 ## 2. Instalar
 
 Desde la carpeta del proyecto:
@@ -31,7 +35,7 @@ Edita `.env` y completa al menos:
 TELEGRAM_TOKEN=pega_aqui_el_token_de_BotFather
 GROQ_API_KEY=pega_aqui_tu_clave_de_Groq
 OPENROUTER_API_KEY=pega_aqui_tu_clave_de_OpenRouter
-OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 GROQ_MODEL=openai/gpt-oss-120b
 MAX_HISTORY=8
 MULTI_BRAIN_SIZE=0
@@ -57,7 +61,7 @@ python main.py
 Si todo está bien, verás un log parecido a:
 
 ```text
-Bot iniciado con el modelo meta-llama/llama-3.3-70b-instruct:free (OpenRouter)
+Bot iniciado con el modelo nvidia/nemotron-3-super-120b-a12b:free (OpenRouter)
 ```
 
 La integración selecciona OpenRouter automáticamente cuando `OPENROUTER_API_KEY` está presente.
@@ -79,7 +83,7 @@ Configura estas variables en el servicio:
 TELEGRAM_TOKEN
 GROQ_API_KEY
 OPENROUTER_API_KEY
-OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 GROQ_MODEL=openai/gpt-oss-120b
 MAX_HISTORY=8
 MULTI_BRAIN_SIZE=0
