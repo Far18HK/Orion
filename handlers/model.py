@@ -4,11 +4,13 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from services.groq_service import GroqError, GroqService, is_chat_model
+from handlers.telegram_utils import send_long_answer
 
 router = Router()
 
 RESET_WORDS = {"reset", "default", "predeterminado"}
 AUTO_WORDS = {"auto", "automático", "automatico", "default", "predeterminado"}
+MAX_MODELS_SHOWN = 35
 
 
 @router.message(Command("modelo"))
@@ -30,11 +32,20 @@ async def cmd_modelo(message: Message, command: CommandObject, ai: GroqService) 
         return
 
     if not arg:
-        options = "\n".join(f"- {m}" for m in available if is_chat_model(m))
-        await message.answer(
+        chat_models = [m for m in available if is_chat_model(m)]
+        shown = chat_models[:MAX_MODELS_SHOWN]
+        options = "\n".join(f"- {m}" for m in shown)
+        more = (
+            f"\n\nMostrando {len(shown)} de {len(chat_models)} modelos de chat. "
+            "Escribe el nombre exacto con /modelo <nombre>."
+            if len(chat_models) > len(shown)
+            else ""
+        )
+        await send_long_answer(
+            message.answer,
             f"Modelo actual: {ai.get_model(user_id)}\n\n"
-            f"Disponibles:\n{options}\n\n"
-            "Cambia con /modelo <nombre>, o /modelo reset para volver al predeterminado."
+            f"Disponibles:\n{options}{more}\n\n"
+            "Cambia con /modelo <nombre>, o /modelo reset para volver al predeterminado.",
         )
         return
 
