@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import time
 from urllib.parse import quote
 
 import aiohttp
@@ -15,6 +16,7 @@ SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", "dist", "bu
 MAX_TREE = 300  # Archivos máximos al listar un repo
 MAX_FILE_BYTES = 500_000
 CHUNK_CHARS = 3500  # Texto por lectura: el agente pagina con start_line si el archivo es largo
+CACHE_SECONDS = 120  # GitHub cambia poco entre llamadas consecutivas del mismo análisis
 
 
 class GitHubError(Exception):
@@ -25,8 +27,20 @@ class GitHubService:
     def __init__(self, token: str) -> None:
         self.token = token
         self._login: str | None = None
+        self._cache: dict[tuple[str, tuple[tuple[str, str], ...], bool], tuple[float, object]] = {}
+
+    def _cache_key(self, path: str, params: dict | None, raw: bool) -> tuple:
+        values = tuple(sorted((str(k), str(v)) for k, v in (params or {}).items()))
+        return path, values, raw
 
     async def _request(self, path: str, params: dict | None = None, raw: bool = False):
+        key = self._cache_key(path, params, raw)
+        cached = self._cache.get(key)
+        now = time.monotonic()
+        if cached and now - cached[0] < CACHE_SECONDS:
+            return cached[1]
+        if cached:
+            self._cache.pop(key, None)
         headers = {
             "Authorization": f"Bearer {self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -48,10 +62,14 @@ class GitHubService:
                     if len(data) > MAX_FILE_BYTES:
                         raise GitHubError("El archivo es demasiado grande para leerlo.")
                     try:
-                        return data.decode("utf-8")
+                        result = data.decode("utf-8")
                     except UnicodeDecodeError:
                         raise GitHubError("Es un archivo binario; no lo puedo leer como texto.") from None
-                return await resp.json()
+                    self._cache[key] = (now, result)
+                    return result
+                result = await resp.json()
+                self._cache[key] = (now, result)
+                return result
 
     async def login(self) -> str:
         if not self._login:

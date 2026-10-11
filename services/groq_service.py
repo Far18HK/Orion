@@ -144,6 +144,7 @@ class GroqService:
             if openrouter_api_key
             else None
         )
+        self._openrouter_disabled = False
         # Servicios a los que el agente puede llegar mediante herramientas
         self.reminders = reminders
         self.notion = notion
@@ -406,7 +407,7 @@ class GroqService:
 
     async def _complete(self, model: str, messages: list[dict], tools: list[dict] | None):
         """Completa texto con OpenRouter y cae a Groq si OpenRouter falla."""
-        if self._openrouter is not None:
+        if self._openrouter is not None and not self._openrouter_disabled:
             try:
                 kwargs = {"model": model, "messages": messages, "temperature": 0.6}
                 if tools:
@@ -414,6 +415,19 @@ class GroqService:
                     kwargs["tool_choice"] = "auto"
                 return await self._openrouter.chat.completions.create(**kwargs)
             except Exception as e:  # noqa: BLE001 - el fallback evita dejar al usuario sin respuesta
+                error_text = str(e).lower()
+                permanent_model_error = getattr(e, "status_code", None) in {400, 404} and (
+                    "not a valid model id" in error_text
+                    or "unknown model" in error_text
+                    or "unavailable for free" in error_text
+                )
+                if permanent_model_error:
+                    self._openrouter_disabled = True
+                    logger.error(
+                        "El modelo de OpenRouter no es utilizable (%s); "
+                        "desactivo OpenRouter hasta reiniciar y uso Groq.",
+                        self._openrouter_model,
+                    )
                 logger.warning("OpenRouter falló; uso Groq como fallback: %s", e)
                 return await self._complete_groq(self.groq_model, messages, tools)
         return await self._complete_groq(model, messages, tools)
