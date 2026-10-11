@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from services.assistant_store import AssistantStore
 from services.github import GitHubService
 from services.notion import NotionService
 from services.reasoning_harness import HarnessPolicy, ReasoningHarness
+from services.pydantic_harness import PydanticHarness
 from services.reminders import ReminderService
 from services.tools import (
     TOOLS,
@@ -52,6 +54,8 @@ SYSTEM_PROMPT = (
     "mejor página, o listar recordatorios y luego cancelar uno).\n"
     "- Si la petición tiene varios pasos o consecuencias importantes, usa plan_task primero y luego "
     "avanza paso a paso; si falta información, pregunta solo lo indispensable.\n"
+    "- En tareas complejas, usa verify_step después de una acción importante y basa la conclusión "
+    "solo en la evidencia devuelta; si la verificación es parcial o falla, dilo claramente.\n"
     "- Puedes navegar: abre páginas con read_webpage y sigue sus enlaces hasta encontrar lo "
     "que el usuario necesita, sin pedirle que lo haga él. Dile si una página no cargó o no sirve.\n"
     "- Para analizar código de GitHub: empieza con github_repo_overview y github_list_files, lee "
@@ -101,7 +105,19 @@ CHARS_PER_TOKEN = 3  # Estimación conservadora para español y código
 OLD_RESULT_CHARS = 300  # Cuánto queda de un resultado de herramienta viejo al recortarlo
 RETRY_WAIT_MAX = 20  # Segundos máximos que esperamos un 429 antes de reintentar
 MAX_TOOL_ROUNDS = 3  # Menos rondas = menor latencia; las herramientas paralelas siguen disponibles.
+MAX_TOTAL_TOOL_CALLS = 12  # Presupuesto duro por ejecución: 3 rondas x 4 llamadas paralelas.
 MAX_MEMORY_CONTEXT_CHARS = 1800
+DEFAULT_SENSITIVE_TOOLS = frozenset({
+    "write_discord_channel",
+    "send_discord_dm",
+    "create_automation",
+    "delete_notes",
+    "edit_note",
+    "cancel_reminder",
+    "create_discord_event",
+    "timeout_discord_member",
+    "delete_discord_message",
+})
 
 
 class GroqError(Exception):
@@ -131,11 +147,15 @@ class GroqService:
         discord_monitor_telegram_ids: frozenset[int] = frozenset(),
         discord_monitor_channel_ids: frozenset[int] = frozenset(),
         discord_write_channel_ids: frozenset[int] = frozenset(),
+        discord_moderator_user_ids: frozenset[int] = frozenset(),
+        discord_moderator_telegram_ids: frozenset[int] = frozenset(),
+        discord_moderator_guild_ids: frozenset[int] = frozenset(),
         require_approval_for_discord: bool = True,
         multi_brain_size: int = 0,
         store: AssistantStore | None = None,
         checkpointer=None,
         approval_tools: frozenset[str] = frozenset(),
+        pydantic_enabled: bool = True,
     ) -> None:
         if not api_keys:
             raise ValueError("GroqService necesita al menos una API key de Groq")
@@ -171,11 +191,29 @@ class GroqService:
         self.discord_monitor_telegram_ids = discord_monitor_telegram_ids
         self.discord_monitor_channel_ids = discord_monitor_channel_ids
         self.discord_write_channel_ids = discord_write_channel_ids
+        self.discord_moderator_user_ids = discord_moderator_user_ids
+        self.discord_moderator_telegram_ids = discord_moderator_telegram_ids
+        self.discord_moderator_guild_ids = discord_moderator_guild_ids
         self.require_approval_for_discord = require_approval_for_discord
         self.multi_brain_size = min(max(multi_brain_size, 0), len(self._clients), 3)
         if self.multi_brain_size == 1:
             self.multi_brain_size = 0
         self.store = store
+        self.pydantic_harness: PydanticHarness | None = None
+        enabled = pydantic_enabled and os.getenv("PYDANTICAI_ENABLED", "true").lower() not in {
+            "0", "false", "no"
+        }
+        if enabled:
+            typed_key = openrouter_api_key or api_keys[0]
+            typed_base_url = (
+                "https://openrouter.ai/api/v1"
+                if openrouter_api_key
+                else "https://api.groq.com/openai/v1"
+            )
+            try:
+                self.pydantic_harness = PydanticHarness(self.model, typed_key, typed_base_url)
+            except Exception:  # noqa: BLE001 - es una mejora opcional
+                logger.exception("PydanticAI no pudo inicializarse; continúo con LangGraph")
         # Historial por usuario: deque descarta solo los mensajes más viejos
         self._history: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=max_history))
         self._history_loaded: set[str] = set()
@@ -198,7 +236,10 @@ class GroqService:
             self._complete,
             self._fit_budget,
             self._run_call,
-            HarnessPolicy(max_tool_rounds=MAX_TOOL_ROUNDS),
+            HarnessPolicy(
+                max_tool_rounds=MAX_TOOL_ROUNDS,
+                max_total_tool_calls=MAX_TOTAL_TOOL_CALLS,
+            ),
             checkpointer=checkpointer,
             needs_approval=self._needs_approval,
         )
@@ -615,9 +656,13 @@ class GroqService:
         return {"role": "tool", "tool_call_id": call.id, "content": result}
 
     def _needs_approval(self, name: str, ctx: ToolContext) -> bool:
-        return name in self.approval_tools
+        # La configuración puede añadir herramientas, pero nunca reduce esta lista
+        # mínima de acciones con efectos externos o destructivos.
+        return name in self.approval_tools or name in DEFAULT_SENSITIVE_TOOLS
 
-    def _build_context(self, user_id: int, platform: str, chat_id: int | None) -> ToolContext:
+    def _build_context(
+        self, user_id: int, platform: str, chat_id: int | None, guild_id: int | None = None
+    ) -> ToolContext:
         """Qué puede hacer el agente en este turno (permisos por usuario y plataforma)."""
         return ToolContext(
             chat_id=chat_id if chat_id is not None else user_id,
@@ -638,17 +683,71 @@ class GroqService:
                 self.discord_token
                 if (
                     (platform == "discord" and user_id in self.discord_monitor_user_ids)
+                    or (platform == "discord" and user_id in self.discord_moderator_user_ids)
                     or (platform == "telegram" and user_id in self.discord_monitor_telegram_ids)
+                    or (platform == "telegram" and user_id in self.discord_moderator_telegram_ids)
                 )
                 else None
             ),
             discord_monitor_channel_ids=self.discord_monitor_channel_ids,
             discord_write_channel_ids=self.discord_write_channel_ids,
+            discord_moderator_token=(
+                self.discord_token
+                if (
+                    (platform == "discord" and user_id in self.discord_moderator_user_ids)
+                    or (platform == "telegram" and user_id in self.discord_moderator_telegram_ids)
+                )
+                else None
+            ),
+            discord_moderator_guild_ids=self.discord_moderator_guild_ids,
+            discord_guild_id=guild_id,
             require_approval_for_discord=self.require_approval_for_discord,
             discord_dm_ids=self.discord_dm_ids,
             team_runner=self._run_team if self.multi_brain_size >= 2 else None,
+            planner_runner=(
+                (lambda objective: self._structured_plan(objective, user_id, platform))
+                if self.pydantic_harness
+                else None
+            ),
+            verifier_runner=(
+                (lambda objective, expected, evidence: self._verify_step(objective, expected, evidence))
+                if self.pydantic_harness
+                else None
+            ),
             store=self.store,
         )
+
+    async def _structured_plan(self, objective: str, user_id: int, platform: str) -> str:
+        """Planificación tipada: PydanticAI estructura; LangGraph sigue ejecutando."""
+        if self.pydantic_harness is None:
+            raise RuntimeError("PydanticAI no está disponible")
+        plan = await self.pydantic_harness.plan(objective)
+        run_id = self.store.create_agent_run(
+            user_id,
+            platform,
+            plan.objective,
+            {"source": "pydanticai", "max_steps": len(plan.steps)},
+        ) if self.store else None
+        lines = [f"Plan tipado (PydanticAI) para: {plan.objective}"]
+        for index, step in enumerate(plan.steps, 1):
+            if run_id and self.store:
+                self.store.add_agent_step(run_id, index, step.title, step.expected_result)
+            hint = f" [{step.tool_hint}]" if step.tool_hint else ""
+            lines.append(f"{index}. {step.title}{hint} → {step.expected_result}")
+        lines.append(f"Definición de terminado: {plan.definition_of_done}")
+        if plan.risk_notes:
+            lines.append("Riesgos: " + "; ".join(plan.risk_notes))
+        return "\n".join(lines)
+
+    async def _verify_step(self, objective: str, expected: str, evidence: str) -> str:
+        if self.pydantic_harness is None:
+            raise RuntimeError("PydanticAI no está disponible")
+        result = await self.pydantic_harness.verify(objective, expected, evidence)
+        status = {"verified": "verificado", "partial": "parcial", "failed": "fallido"}[result.status]
+        answer = f"Verificación: {status}. Evidencia: {result.evidence}"
+        if result.next_action:
+            answer += f" Siguiente acción: {result.next_action}"
+        return answer
 
     async def ask(
         self,
@@ -658,6 +757,7 @@ class GroqService:
         chat_id: int | None = None,
         platform: str = "telegram",
         interactive: bool = True,
+        guild_id: int | None = None,
     ) -> str:
         """Corre el agente: el modelo decide si responde directo o usa herramientas.
 
@@ -675,7 +775,7 @@ class GroqService:
             if interactive:
                 # Si había una acción esperando un sí/no y siguió con otra cosa, no se ejecuta
                 await self._discard_pending(user_id, platform)
-            ctx = self._build_context(user_id, platform, chat_id)
+            ctx = self._build_context(user_id, platform, chat_id, guild_id)
             specs = build_tool_specs(ctx)
             self._load_persistent_history(key, user_id, platform)
             messages = [
@@ -683,9 +783,21 @@ class GroqService:
             ]
             model = self.get_model(user_id, platform)
             thread_id = f"{key}:{uuid4().hex[:10]}"
+            run_id = (
+                self.store.create_agent_run(
+                    user_id,
+                    platform,
+                    text,
+                    budget={"max_tool_rounds": MAX_TOOL_ROUNDS, "max_tool_calls": MAX_TOTAL_TOOL_CALLS},
+                )
+                if self.store
+                else None
+            )
             saved = saved_as or text
             if interactive:
-                self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+                self._save_turn(
+                    user_id, platform, "running", thread_id, ctx, model, text, saved, run_id=run_id
+                )
         except GroqError:
             raise
         except Exception as e:
@@ -703,6 +815,7 @@ class GroqService:
             model=model,
             text=text,
             saved=saved,
+            run_id=run_id,
             interactive=interactive,
         )
 
@@ -718,6 +831,7 @@ class GroqService:
         approved: bool,
         platform: str = "telegram",
         chat_id: int | None = None,
+        guild_id: int | None = None,
     ) -> str:
         """Responde sí/no a la acción pausada y deja que el turno continúe."""
         record = self.store.get_checkpoint(user_id, platform) if self.store else None
@@ -726,7 +840,9 @@ class GroqService:
         payload = record[1]
         thread_id = payload["thread_id"]
         try:
-            ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+            ctx = self._build_context(
+                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id)
+            )
             specs = build_tool_specs(ctx)
             self.store.audit(
                 user_id,
@@ -739,8 +855,11 @@ class GroqService:
             )
             model = payload.get("model") or self.get_model(user_id, platform)
             text, saved = payload.get("text", ""), payload.get("saved", "")
+            run_id = payload.get("run_id")
             # Pasa a "running" ya: un segundo toque en «Aprobar» no puede ejecutarla dos veces
-            self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+            self._save_turn(
+                user_id, platform, "running", thread_id, ctx, model, text, saved, run_id=run_id
+            )
         except GroqError:
             raise
         except Exception as e:
@@ -754,10 +873,12 @@ class GroqService:
             model=model,
             text=text,
             saved=saved,
+            run_id=run_id,
         )
 
     async def resume_interrupted(
-        self, user_id: int, platform: str = "telegram", chat_id: int | None = None
+        self, user_id: int, platform: str = "telegram", chat_id: int | None = None,
+        guild_id: int | None = None
     ) -> str:
         """Retoma un turno que quedó a medias por un reinicio o una caída."""
         record = self.store.get_checkpoint(user_id, platform) if self.store else None
@@ -768,10 +889,13 @@ class GroqService:
         if thread_id in self._active_threads:
             raise GroqError("Ese turno sigue en curso; espera a que termine.")
         try:
-            ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+            ctx = self._build_context(
+                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id)
+            )
             specs = build_tool_specs(ctx)
             model = payload.get("model") or self.get_model(user_id, platform)
             text, saved = payload.get("text", ""), payload.get("saved", "")
+            run_id = payload.get("run_id")
             self.store.audit(user_id, platform, "resume", f"reanudando {thread_id}")
         except GroqError:
             raise
@@ -786,6 +910,7 @@ class GroqService:
             model=model,
             text=text,
             saved=saved,
+            run_id=run_id,
         )
 
     def _save_turn(
@@ -799,6 +924,7 @@ class GroqService:
         text: str,
         saved: str,
         calls: list[dict] | None = None,
+        run_id: str | None = None,
     ) -> None:
         if self.store is None:
             return
@@ -809,10 +935,12 @@ class GroqService:
             {
                 "thread_id": thread_id,
                 "chat_id": ctx.chat_id,
+                "guild_id": ctx.discord_guild_id,
                 "model": model,
                 "text": text[:1000],
                 "saved": saved[:1000],
                 "calls": calls or [],
+                "run_id": run_id,
             },
         )
 
@@ -845,6 +973,7 @@ class GroqService:
         model: str,
         text: str,
         saved: str,
+        run_id: str | None = None,
         interactive: bool = True,
     ) -> str:
         """Ejecuta (o reanuda) un turno y decide qué queda guardado según cómo termine."""
@@ -857,23 +986,31 @@ class GroqService:
             # NO entra aquí: el checkpoint queda para /reanudar.)
             if interactive and self.store is not None:
                 self.store.clear_checkpoint(user_id, platform)
+            if self.store and run_id:
+                self.store.update_agent_run(run_id, "failed", failure_reason=str(e))
             await self.harness.discard(thread_id)
             raise self._handle_error(e) from e
         finally:
             self._active_threads.discard(thread_id)
 
         if result.interrupted:
+            if self.store and run_id:
+                self.store.update_agent_run(run_id, "waiting_approval")
             self._save_turn(
                 user_id, platform, "awaiting_approval", thread_id, ctx, model, text, saved,
-                calls=result.pending,
+                calls=result.pending, run_id=run_id,
             )
             return self._approval_prompt(result.pending)
 
+        if self.store and run_id:
+            self.store.update_agent_run(run_id, "verifying")
         if interactive and self.store is not None:
             self.store.clear_checkpoint(user_id, platform)
         await self.harness.discard(thread_id)
         answer = (result.content or "").strip()
         if not answer:
+            if self.store and run_id:
+                self.store.update_agent_run(run_id, "failed", failure_reason="El modelo no produjo una respuesta")
             raise GroqError("No pude generar respuesta para eso 🤔 ¿Lo intentas de otra forma?")
 
         # Solo guardamos la pregunta y la respuesta final, no las idas y vueltas con herramientas
@@ -883,6 +1020,8 @@ class GroqService:
         if self.store:
             self.store.save_conversation_turn(user_id, platform, "user", saved or text)
             self.store.save_conversation_turn(user_id, platform, "assistant", answer)
+            if run_id:
+                self.store.update_agent_run(run_id, "done", result=answer)
         return answer
 
     async def ask_about_document(

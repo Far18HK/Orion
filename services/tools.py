@@ -27,6 +27,12 @@ from services.discord_monitor import (
     read_recent_messages,
     send_channel_message,
 )
+from services.discord_moderation import (
+    DiscordModerationError,
+    create_scheduled_event,
+    delete_message,
+    timeout_member,
+)
 from services.assistant_store import AssistantStore
 from services.automation_service import next_run_for
 
@@ -66,9 +72,14 @@ class ToolContext:
     discord_monitor_token: str | None = None  # Solo para usuarios autorizados a leer canales
     discord_monitor_channel_ids: frozenset[int] = frozenset()
     discord_write_channel_ids: frozenset[int] = frozenset()
+    discord_moderator_token: str | None = None
+    discord_moderator_guild_ids: frozenset[int] = frozenset()
+    discord_guild_id: int | None = None
     require_approval_for_discord: bool = True
     discord_dm_ids: frozenset[int] = frozenset()  # Únicos destinatarios permitidos
     team_runner: Callable[[str], Awaitable[str]] | None = None
+    planner_runner: Callable[[str], Awaitable[str]] | None = None
+    verifier_runner: Callable[[str, str, str], Awaitable[str]] | None = None
     store: AssistantStore | None = None
 
 
@@ -558,6 +569,52 @@ async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
         return f"Error: {e}"
 
 
+async def _t_create_discord_event(ctx: ToolContext, args: dict) -> str:
+    if not ctx.discord_moderator_token:
+        return "Error: no tienes permisos de moderador Discord configurados."
+    try:
+        guild_id = int(args.get("guild_id") or ctx.discord_guild_id or 0)
+        return await create_scheduled_event(
+            ctx.discord_moderator_token, guild_id, ctx.discord_moderator_guild_ids,
+            str(args.get("name", "")), str(args.get("description", "")),
+            str(args.get("start_at", "")), str(args.get("end_at", "")),
+            str(args.get("location", "")),
+        )
+    except (DiscordModerationError, ValueError) as e:
+        return f"Error: {e}"
+
+
+async def _t_timeout_discord_member(ctx: ToolContext, args: dict) -> str:
+    if not ctx.discord_moderator_token:
+        return "Error: no tienes permisos de moderador Discord configurados."
+    try:
+        return await timeout_member(
+            ctx.discord_moderator_token,
+            int(args.get("guild_id") or ctx.discord_guild_id or 0),
+            ctx.discord_moderator_guild_ids,
+            int(args.get("member_id") or 0),
+            str(args.get("until", "")), str(args.get("reason", "")),
+        )
+    except (DiscordModerationError, ValueError) as e:
+        return f"Error: {e}"
+
+
+async def _t_delete_discord_message(ctx: ToolContext, args: dict) -> str:
+    if not ctx.discord_moderator_token:
+        return "Error: no tienes permisos de moderador Discord configurados."
+    try:
+        return await delete_message(
+            ctx.discord_moderator_token,
+            int(args.get("guild_id") or ctx.discord_guild_id or 0),
+            ctx.discord_moderator_guild_ids,
+            int(args.get("channel_id") or ctx.chat_id),
+            int(args.get("message_id") or 0),
+            str(args.get("reason", "")),
+        )
+    except (DiscordModerationError, ValueError) as e:
+        return f"Error: {e}"
+
+
 def describe_call(name: str, arguments: str) -> str:
     """Texto corto y legible de una llamada, para pedirle al usuario que la apruebe."""
     try:
@@ -574,6 +631,13 @@ def describe_call(name: str, arguments: str) -> str:
             f"Crear la automatización «{str(args.get('schedule', ''))[:60]}»: "
             f"{str(args.get('instruction', ''))[:300]}"
         )
+    if name == "create_discord_event":
+        return (
+            f"Crear evento Discord «{str(args.get('name', ''))[:100]}» del "
+            f"{str(args.get('start_at', ''))[:30]} al {str(args.get('end_at', ''))[:30]}"
+        )
+    if name in {"timeout_discord_member", "delete_discord_message"}:
+        return f"Acción de moderación Discord: {name} {json.dumps(args, ensure_ascii=False)[:220]}"
     detail = json.dumps(args, ensure_ascii=False)[:300]
     return f"{name} {detail}" if args else name
 
@@ -635,6 +699,11 @@ async def _t_plan_task(ctx: ToolContext, args: dict) -> str:
     task = str(args.get("task", "")).strip()
     if not task:
         return "Error: falta la tarea a planificar."
+    if ctx.planner_runner is not None:
+        try:
+            return await ctx.planner_runner(task)
+        except Exception as exc:  # noqa: BLE001 - planificar no debe tumbar el chat
+            logger.warning("PydanticAI no pudo generar un plan tipado: %s", exc)
     return (
         "Plan propuesto (todavía no ejecutado):\n"
         "1. Definir resultado y restricciones.\n"
@@ -643,6 +712,17 @@ async def _t_plan_task(ctx: ToolContext, args: dict) -> str:
         "4. Verificar resultados y reportar bloqueos.\n"
         f"Objetivo: {task}"
     )
+
+
+async def _t_verify_step(ctx: ToolContext, args: dict) -> str:
+    objective = str(args.get("objective", "")).strip()
+    expected = str(args.get("expected_result", "")).strip()
+    evidence = str(args.get("evidence", "")).strip()
+    if not objective or not expected or not evidence:
+        return "Error: verify_step necesita objective, expected_result y evidence."
+    if ctx.verifier_runner is None:
+        return "La verificación tipada no está habilitada en este despliegue."
+    return await ctx.verifier_runner(objective, expected, evidence)
 
 
 async def _t_create_automation(ctx: ToolContext, args: dict) -> str:
@@ -942,6 +1022,19 @@ TOOLS: list[Tool] = [
     Tool("list_tasks", "Lista tareas pendientes.", {"include_done": {"type": "boolean"}}, (), _t_list_tasks, needs="store"),
     Tool("complete_task", "Marca una tarea como completada.", {"id": _str("Id exacto de la tarea.")}, ("id",), _t_complete_task, needs="store"),
     Tool("plan_task", "Divide una tarea compleja en pasos antes de ejecutarla.", {"task": _str("Objetivo completo.")}, ("task",), _t_plan_task, needs="store"),
+    Tool(
+        "verify_step",
+        "Comprueba con un evaluador tipado si la evidencia demuestra el resultado esperado. "
+        "Úsala después de una acción importante; no inventes evidencia.",
+        {
+            "objective": _str("Objetivo del paso."),
+            "expected_result": _str("Resultado que debía producir el paso."),
+            "evidence": _str("Evidencia concreta devuelta por la herramienta o sistema."),
+        },
+        ("objective", "expected_result", "evidence"),
+        _t_verify_step,
+        needs="verifier_runner",
+    ),
     Tool("create_automation", "Registra una automatización futura, sin ejecutarla todavía.", {"instruction": _str("Qué debe hacer."), "schedule": _str("Horario o frecuencia.")}, ("instruction", "schedule"), _t_create_automation, needs="store"),
     Tool("audit_log", "Muestra acciones recientes del asistente.", {"limit": {"type": "integer"}}, (), _t_audit, needs="store"),
     Tool(
@@ -971,6 +1064,48 @@ TOOLS: list[Tool] = [
         ("text",),
         _t_write_discord_channel,
         needs="discord_monitor_token",
+    ),
+    Tool(
+        "create_discord_event",
+        "Crea un evento programado de Discord en un servidor autorizado. Requiere aprobación humana. "
+        "Usa fechas ISO 8601 y no inventes el guild_id.",
+        {
+            "guild_id": {"type": "integer", "description": "ID del servidor."},
+            "name": _str("Nombre del evento."),
+            "description": _str("Descripción breve."),
+            "start_at": _str("Inicio ISO 8601 con zona horaria."),
+            "end_at": _str("Fin ISO 8601 con zona horaria."),
+            "location": _str("Canal, enlace o lugar del evento."),
+        },
+        ("name", "start_at", "end_at", "location"),
+        _t_create_discord_event,
+        needs="discord_moderator_token",
+    ),
+    Tool(
+        "timeout_discord_member",
+        "Aplica un timeout temporal a un miembro de Discord por una razón concreta. Requiere aprobación humana.",
+        {
+            "guild_id": {"type": "integer", "description": "ID del servidor."},
+            "member_id": {"type": "integer", "description": "ID del miembro."},
+            "until": _str("Fin del timeout en ISO 8601."),
+            "reason": _str("Razón de moderación."),
+        },
+        ("member_id", "until", "reason"),
+        _t_timeout_discord_member,
+        needs="discord_moderator_token",
+    ),
+    Tool(
+        "delete_discord_message",
+        "Elimina un mensaje concreto de Discord. Requiere aprobación humana; no borra mensajes masivamente.",
+        {
+            "guild_id": {"type": "integer", "description": "ID del servidor."},
+            "channel_id": {"type": "integer", "description": "ID del canal."},
+            "message_id": {"type": "integer", "description": "ID exacto del mensaje."},
+            "reason": _str("Razón de moderación."),
+        },
+        ("message_id", "reason"),
+        _t_delete_discord_message,
+        needs="discord_moderator_token",
     ),
     Tool(
         "team_reason",

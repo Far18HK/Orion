@@ -56,6 +56,24 @@ class AssistantStore:
                     description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                     UNIQUE(user_id, name)
                 );
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, platform TEXT NOT NULL,
+                    objective TEXT NOT NULL, status TEXT NOT NULL,
+                    budget TEXT NOT NULL DEFAULT '{}', result TEXT NOT NULL DEFAULT '',
+                    failure_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_steps (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, position INTEGER NOT NULL,
+                    title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0, expected_result TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_user_status
+                    ON agent_runs(user_id, platform, status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_steps_run_position
+                    ON agent_steps(run_id, position);
                 """
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(automations)")}
@@ -373,3 +391,99 @@ class AssistantStore:
         except json.JSONDecodeError:
             payload = {}
         return row[0], payload if isinstance(payload, dict) else {}, row[2]
+
+    # ---------------------------------------------------------------- ejecuciones autónomas
+
+    def create_agent_run(
+        self, user_id: int, platform: str, objective: str, budget: dict | None = None
+    ) -> str:
+        run_id = uuid4().hex[:16]
+        now = self._now()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO agent_runs "
+                "(id,user_id,platform,objective,status,budget,created_at,updated_at) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
+                (
+                    run_id,
+                    user_id,
+                    platform,
+                    objective[:4000],
+                    json.dumps(budget or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        return run_id
+
+    def update_agent_run(
+        self, run_id: str, status: str, result: str = "", failure_reason: str = ""
+    ) -> bool:
+        allowed = {
+            "queued", "planning", "running", "waiting_approval", "verifying",
+            "done", "failed", "cancelled",
+        }
+        if status not in allowed:
+            raise ValueError(f"Estado de ejecución inválido: {status}")
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            return (
+                conn.execute(
+                    "UPDATE agent_runs SET status=?, result=?, failure_reason=?, updated_at=? WHERE id=?",
+                    (status, result[:12000], failure_reason[:2000], self._now(), run_id),
+                ).rowcount
+                > 0
+            )
+
+    def agent_runs(self, user_id: int, platform: str = "telegram", limit: int = 20) -> list[dict]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT id, objective, status, result, failure_reason, created_at, updated_at "
+                "FROM agent_runs WHERE user_id=? AND platform=? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, platform, min(max(limit, 1), 50)),
+            ).fetchall()
+        keys = ("id", "objective", "status", "result", "failure_reason", "created_at", "updated_at")
+        return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def add_agent_step(
+        self, run_id: str, position: int, title: str, expected_result: str = ""
+    ) -> str:
+        step_id = uuid4().hex[:16]
+        now = self._now()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO agent_steps "
+                "(id,run_id,position,title,expected_result,created_at,updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (step_id, run_id, position, title[:500], expected_result[:2000], now, now),
+            )
+        return step_id
+
+    def update_agent_step(
+        self,
+        step_id: str,
+        status: str,
+        evidence: str = "",
+        error: str = "",
+        attempts: int | None = None,
+    ) -> bool:
+        allowed = {"pending", "running", "waiting_approval", "verifying", "done", "failed", "skipped"}
+        if status not in allowed:
+            raise ValueError(f"Estado de paso inválido: {status}")
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            if attempts is None:
+                query = "UPDATE agent_steps SET status=?, evidence=?, error=?, updated_at=? WHERE id=?"
+                args = (status, evidence[:6000], error[:2000], self._now(), step_id)
+            else:
+                query = "UPDATE agent_steps SET status=?, attempts=?, evidence=?, error=?, updated_at=? WHERE id=?"
+                args = (status, max(attempts, 0), evidence[:6000], error[:2000], self._now(), step_id)
+            return conn.execute(query, args).rowcount > 0
+
+    def agent_steps(self, run_id: str) -> list[dict]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT id, position, title, status, attempts, expected_result, evidence, error "
+                "FROM agent_steps WHERE run_id=? ORDER BY position",
+                (run_id,),
+            ).fetchall()
+        keys = ("id", "position", "title", "status", "attempts", "expected_result", "evidence", "error")
+        return [dict(zip(keys, row, strict=True)) for row in rows]

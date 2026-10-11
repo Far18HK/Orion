@@ -39,6 +39,7 @@ class HarnessPolicy(BaseModel):
     """Límites que evitan bucles infinitos y herramientas sin control."""
 
     max_tool_rounds: int = Field(default=8, ge=1, le=20)
+    max_total_tool_calls: int = Field(default=12, ge=1, le=100)
 
 
 class HarnessState(TypedDict, total=False):
@@ -47,6 +48,7 @@ class HarnessState(TypedDict, total=False):
     messages: list[dict]
     model: str
     rounds: int
+    tool_calls_used: int
     assistant: dict  # {"content": str, "tool_calls": [{"id", "name", "arguments"}]}
     denied: list[str]  # ids de llamadas que el usuario no aprobó
 
@@ -116,6 +118,7 @@ class ReasoningHarness:
             "messages": messages,
             "model": model,
             "rounds": 0,
+            "tool_calls_used": 0,
             "denied": [],
         }
         return await self._invoke(state, thread_id or uuid4().hex, tools, ctx, interactive)
@@ -186,7 +189,12 @@ class ReasoningHarness:
         rounds = state.get("rounds", 0)
         tools = configurable.get("tools")
         # Pasada la última vuelta se quitan las herramientas para forzar una respuesta final
-        round_tools = tools if rounds < self.policy.max_tool_rounds else None
+        round_tools = (
+            tools
+            if rounds < self.policy.max_tool_rounds
+            and state.get("tool_calls_used", 0) < self.policy.max_total_tool_calls
+            else None
+        )
         # Copia: el recorte de presupuesto no debe tocar el estado ya guardado
         messages = [dict(m) for m in state["messages"]]
         self.fit_budget(messages, round_tools)
@@ -225,6 +233,8 @@ class ReasoningHarness:
     async def _tools_node(self, state: HarnessState, config: RunnableConfig) -> HarnessState:
         assistant = state["assistant"]
         calls = assistant.get("tool_calls") or []
+        used = state.get("tool_calls_used", 0)
+        calls = calls[: max(self.policy.max_total_tool_calls - used, 0)]
         denied = set(state.get("denied") or [])
         ctx = config.get("configurable", {}).get("context")
         messages = list(state["messages"])
@@ -246,7 +256,7 @@ class ReasoningHarness:
             *(self._run_one(call, ctx, call["id"] in denied) for call in calls)
         )
         messages.extend(results)
-        return {"messages": messages, "denied": []}
+        return {"messages": messages, "denied": [], "tool_calls_used": used + len(calls)}
 
     async def _run_one(self, call: dict, ctx: Any, denied: bool) -> dict:
         if denied:
@@ -259,6 +269,10 @@ class ReasoningHarness:
 
     def _route_after_model(self, state: HarnessState) -> str:
         calls = (state.get("assistant") or {}).get("tool_calls")
-        if calls and state.get("rounds", 0) <= self.policy.max_tool_rounds:
+        if (
+            calls
+            and state.get("rounds", 0) <= self.policy.max_tool_rounds
+            and state.get("tool_calls_used", 0) < self.policy.max_total_tool_calls
+        ):
             return "gate"
         return END
