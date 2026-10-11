@@ -17,8 +17,11 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - OpenRouter como proveedor principal opcional para texto, con fallback automático a Groq.
 - Memoria permanente, tareas, planes, automatizaciones registradas y auditoría en SQLite.
 - Harness de razonamiento con LangGraph y límites/validación de estado con Pydantic.
+- Arquitectura híbrida: LangGraph conserva el flujo durable, las interrupciones y la reanudación; PydanticAI aporta planes y verificaciones tipadas mediante `plan_task` y `verify_step`.
 - Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
+- Ejecuciones autónomas persistentes consultables con `/ejecuciones` y cancelables con `/cancelar_ejecucion <id>`, con presupuesto de herramientas por turno.
 - Aprobación humana real (`/aprobar`, `/rechazar` o botones) para acciones con efectos, y `/reanudar` para retomar un turno interrumpido.
+- Por seguridad, Orion también pide aprobación para DMs de Discord, editar/borrar notas y cancelar recordatorios.
 
 ## Instalación local
 
@@ -54,9 +57,13 @@ Para que Orion pueda revisar Discord cuando se lo pidas, configura `DISCORD_MONI
 
 Para permitir que publique mensajes, configura además `DISCORD_WRITE_CHANNEL_IDS`. Es una lista separada y más restrictiva. Desde Telegram debes indicar el ID del canal; desde Discord puede usar el canal actual. El bot necesita también el permiso **Send Messages**.
 
+Orion puede actuar como moderador controlado. Configura `DISCORD_MODERATOR_USER_IDS` para moderadores que escriben desde Discord, `DISCORD_MODERATOR_TELEGRAM_IDS` para administradores que lo controlan desde Telegram y `DISCORD_MODERATOR_GUILD_IDS` con los servidores permitidos. Necesita los permisos de Discord **Manage Events**, **Moderate Members** y **Manage Messages** según las funciones que uses. Puede crear eventos programados, publicar anuncios, aplicar timeouts y borrar mensajes concretos. Todas estas acciones pasan por aprobación humana y quedan auditadas; no hay borrado masivo, baneos ni cambios de roles automáticos.
+
 Para activar el modo multi-cerebro, define `GROQ_API_KEYS` con 2 o 3 claves de cuentas distintas y `MULTI_BRAIN_SIZE=2` o `MULTI_BRAIN_SIZE=3`. El agente usará `team_reason` cuando pidas una segunda opinión, una revisión profunda o "doble/triple cerebro". Esto consume una llamada por analista y una llamada final de síntesis.
 
-Funciones autónomas disponibles: `remember`/`recall`/`forget` para memoria, `create_task`/`list_tasks`/`complete_task` para tareas, `plan_task` para descomponer objetivos y `audit_log` para consultar acciones. `create_automation` registra y ejecuta instrucciones con frecuencias de intervalo como `cada 30m`, `cada 2h` o `cada 1d`; las ejecuciones sobreviven a reinicios porque su estado queda en SQLite.
+Funciones autónomas disponibles: `remember`/`recall`/`forget` para memoria, `create_task`/`list_tasks`/`complete_task` para tareas, `plan_task` para descomponer objetivos y `audit_log` para consultar acciones. Cada turno queda registrado en `agent_runs` con estado y presupuesto; `/ejecuciones` muestra el historial. `create_automation` registra y ejecuta instrucciones con frecuencias de intervalo como `cada 30m`, `cada 2h` o `cada 1d`; las ejecuciones sobreviven a reinicios porque su estado queda en SQLite.
+
+PydanticAI se activa por defecto para estructurar planes y validar evidencia. Puedes desactivarlo con `PYDANTICAI_ENABLED=false`; LangGraph seguirá funcionando como orquestador durable.
 
 ## Railway
 
@@ -73,7 +80,7 @@ Las pruebas cubren el parser de recordatorios, el almacén SQLite y el harness (
 
 ## Harness de razonamiento
 
-Orion usa LangGraph para orquestar cada turno: modelo, herramientas y respuesta final forman un flujo controlado con un máximo de rondas. Pydantic valida la política del harness para evitar límites inválidos. Telegram, Discord, Groq, Notion, GitHub y las herramientas existentes siguen siendo los adaptadores de la aplicación; el harness no reemplaza esos servicios.
+Orion usa LangGraph para orquestar cada turno: modelo, compuerta de aprobación, herramientas y respuesta final forman un flujo controlado con un máximo de rondas. PydanticAI se usa como capa especializada y opcional: `plan_task` produce un `AgentPlan` tipado y `verify_step` produce un `VerificationResult` tipado. PydanticAI no ejecuta acciones ni puede saltarse el checkpointer o las aprobaciones de LangGraph.
 
 La persistencia de automatizaciones y memoria continúa en SQLite.
 

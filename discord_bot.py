@@ -20,6 +20,8 @@ HELP_TEXT = (
     "Soy tu asistente. Escríbeme normal (en servidores, mencióname) y yo decido qué herramienta "
     "usar: buscar en internet, leer enlaces, recordatorios, notas, calculadora, clima, hora y GitHub.\n"
     "Comandos: `id` (tu id de Discord), `reset` (borra la memoria de la conversación), `ayuda`.\n"
+    "Con permisos de moderador puedo preparar anuncios, crear eventos, aplicar timeouts y borrar "
+    "mensajes concretos; siempre te pediré aprobación antes de ejecutar una acción administrativa.\n"
     "Si pido tu aprobación para algo, responde `aprobar` o `rechazar`; `reanudar` retoma un turno "
     "que quedó a medias tras un reinicio."
 )
@@ -91,14 +93,22 @@ class DiscordFront(discord.Client):
                         command == "aprobar",
                         platform="discord",
                         chat_id=message.channel.id,
+                        guild_id=message.guild.id if message.guild else None,
                     )
                 elif command == "reanudar":
                     answer = await self.ai.resume_interrupted(
-                        message.author.id, platform="discord", chat_id=message.channel.id
+                        message.author.id,
+                        platform="discord",
+                        chat_id=message.channel.id,
+                        guild_id=message.guild.id if message.guild else None,
                     )
                 else:
                     answer = await self.ai.ask(
-                        message.author.id, text, chat_id=message.channel.id, platform="discord"
+                        message.author.id,
+                        text,
+                        chat_id=message.channel.id,
+                        platform="discord",
+                        guild_id=message.guild.id if message.guild else None,
                     )
             except GroqError as e:
                 await message.reply(str(e))

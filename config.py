@@ -39,6 +39,9 @@ class Settings:
     discord_monitor_telegram_ids: frozenset[int]  # Usuarios de Telegram autorizados a leer Discord
     discord_monitor_channel_ids: frozenset[int]  # Canales de Discord que se pueden consultar
     discord_write_channel_ids: frozenset[int]  # Canales de Discord donde se puede escribir
+    discord_moderator_user_ids: frozenset[int]
+    discord_moderator_telegram_ids: frozenset[int]
+    discord_moderator_guild_ids: frozenset[int]
     require_approval_for_discord: bool
     automations_enabled: bool
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
@@ -169,6 +172,15 @@ def load_settings() -> Settings:
         discord_write_channel_ids = frozenset(
             int(x) for x in os.getenv("DISCORD_WRITE_CHANNEL_IDS", "").replace(" ", "").split(",") if x
         )
+        discord_moderator_user_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MODERATOR_USER_IDS", "").replace(" ", "").split(",") if x
+        )
+        discord_moderator_telegram_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MODERATOR_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
+        )
+        discord_moderator_guild_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_MODERATOR_GUILD_IDS", "").replace(" ", "").split(",") if x
+        )
     except ValueError:
         raise RuntimeError(
             "DISCORD_MONITOR_*_IDS debe contener listas de números separadas por coma"
@@ -207,6 +219,9 @@ def load_settings() -> Settings:
         discord_monitor_telegram_ids=discord_monitor_telegram_ids,
         discord_monitor_channel_ids=discord_monitor_channel_ids,
         discord_write_channel_ids=discord_write_channel_ids,
+        discord_moderator_user_ids=discord_moderator_user_ids,
+        discord_moderator_telegram_ids=discord_moderator_telegram_ids,
+        discord_moderator_guild_ids=discord_moderator_guild_ids,
         require_approval_for_discord=require_approval_for_discord,
         automations_enabled=automations_enabled,
         github_token=github_token,

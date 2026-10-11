@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from config import load_settings, resolve_checkpoint_path
-from handlers import approvals, chat, documents, media, model, notes, reminders, start
+from handlers import agent_runs, approvals, chat, documents, media, model, notes, reminders, start
 from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware, UserGuardMiddleware
 from services.github import GitHubService
@@ -98,6 +98,9 @@ async def main() -> None:
         discord_monitor_telegram_ids=settings.discord_monitor_telegram_ids,
         discord_monitor_channel_ids=settings.discord_monitor_channel_ids,
         discord_write_channel_ids=settings.discord_write_channel_ids,
+        discord_moderator_user_ids=settings.discord_moderator_user_ids,
+        discord_moderator_telegram_ids=settings.discord_moderator_telegram_ids,
+        discord_moderator_guild_ids=settings.discord_moderator_guild_ids,
         require_approval_for_discord=settings.require_approval_for_discord,
         multi_brain_size=settings.multi_brain_size,
         store=assistant_store,
@@ -119,6 +122,7 @@ async def main() -> None:
     dp.include_router(documents.router)
     dp.include_router(model.router)
     dp.include_router(approvals.router)
+    dp.include_router(agent_runs.router)
     dp.include_router(chat.router)
 
     # Menú de comandos (botón "/" en Telegram)
