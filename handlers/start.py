@@ -25,6 +25,8 @@ COMMANDS = [
     ("aprobar", "Aprueba la acción que Orion dejó en pausa"),
     ("rechazar", "Rechaza la acción que Orion dejó en pausa"),
     ("reanudar", "Retoma un turno que quedó a medias tras un reinicio"),
+    ("ejecuciones", "Muestra ejecuciones autónomas recientes"),
+    ("cancelar_ejecucion", "Cancela una ejecución autónoma por id"),
     ("reset", "Borra la memoria de esta conversación"),
 ]
 BOT_COMMANDS = [BotCommand(command=name, description=desc) for name, desc in COMMANDS]
