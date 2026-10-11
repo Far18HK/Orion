@@ -31,8 +31,8 @@ from services.assistant_store import AssistantStore
 from services.automation_service import next_run_for
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
-from services.reminders import ReminderError, ReminderService
-from services.schedule_parser import find_timezones, format_when
+from services.reminders import ReminderService
+from services.schedule_parser import ReminderError, find_timezones, format_when
 
 logger = logging.getLogger(__name__)
 

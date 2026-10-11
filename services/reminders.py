@@ -1,138 +1,178 @@
-"""Recordatorios: /recordar, /recordatorios (y /cancelar) y /zona."""
-from datetime import datetime
+"""Servicio de recordatorios: mensajes futuros únicos o repetidos, persistentes en SQLite."""
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+import aiohttp
+from aiogram import Bot
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from services.reminders import ReminderError, ReminderService
-from services.schedule_parser import find_timezones, format_when
+from services.schedule_parser import ReminderError, parse_duration, parse_reminder
 
-router = Router()
-
-CALLBACK_PREFIX = "rc:"  # callback_data = "rc:<id del recordatorio>" (cabe de sobra en los 64 bytes)
-BUTTONS_PER_ROW = 5
-PREVIEW_CHARS = 80
-
-USAGE = (
-    "Uso: /recordar <cuándo> <mensaje>\n\n"
-    "En un rato:\n"
-    "/recordar 30m Tomar agua  (m, h, d; también 1h30m)\n\n"
-    "A una hora o fecha:\n"
-    "/recordar 18:30 Llamar a mamá\n"
-    "/recordar mañana 8:00 Sacar la basura\n"
-    "/recordar lunes 9:00 Reunión\n"
-    "/recordar 25/12 10:00 Felicitar\n\n"
-    "Repetido:\n"
-    "/recordar cada día 8:00 Vitaminas\n"
-    "/recordar cada lunes 9:00 Reporte\n"
-    "/recordar cada 2h Tomar agua\n\n"
-    "Las horas usan tu zona horaria: /zona\n"
-    "Ver y cancelar: /recordatorios"
-)
+MAX_PER_CHAT = 20  # Tope de recordatorios pendientes por chat
 
 
-@router.message(Command("recordar"))
-async def cmd_recordar(message: Message, command: CommandObject, reminders: ReminderService) -> None:
-    # command.args ya viene sin "/recordar" ni "@tubot": funciona igual en grupos
-    args = (command.args or "").strip()
-    if not args:
-        await message.answer(USAGE)
-        return
+async def _send_reminder(token: str, chat_id: int, text: str) -> None:
+    """Función a nivel de módulo: así APScheduler puede serializarla al guardarla en SQLite.
 
+    Ojo: no cambiar su firma, los recordatorios ya guardados en reminders.db la usan.
+    """
+    bot = Bot(token=token)
     try:
-        text, when = reminders.create(message.chat.id, args)
-    except ReminderError as e:
-        await message.answer(str(e))
-        return
-
-    await message.answer(f"Listo, te recuerdo «{text}» {when} ⏰")
+        await bot.send_message(chat_id, f"⏰ Recordatorio: {text}")
+    finally:
+        await bot.session.close()
 
 
-def _render_list(
-    reminders: ReminderService, chat_id: int
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    items = reminders.list_jobs(chat_id)
-    if not items:
-        return "No tienes recordatorios pendientes 📭", None
+async def _send_discord_reminder(token: str, channel_id: int, text: str) -> None:
+    """Igual que _send_reminder pero por la API REST de Discord (no necesita el cliente abierto).
 
-    tz = reminders.get_timezone(chat_id) or ZoneInfo("UTC")
-    lines = [f"⏰ Tus recordatorios (hora de {tz.key}):", ""]
-    for i, item in enumerate(items, start=1):
-        text = item.text if len(item.text) <= PREVIEW_CHARS else item.text[:PREVIEW_CHARS] + "…"
-        when = format_when(item.next_run, tz) if item.next_run else "pausado"
-        detail = f"{item.description} (próximo: {when})" if item.recurring else when
-        lines.append(f"{i}. {text}\n   {detail}")
-    lines.append("\nToca ❌ para cancelar uno.")
-
-    buttons = [
-        InlineKeyboardButton(text=f"❌ {i}", callback_data=f"{CALLBACK_PREFIX}{item.id}")
-        for i, item in enumerate(items, start=1)
-    ]
-    rows = [buttons[i : i + BUTTONS_PER_ROW] for i in range(0, len(buttons), BUTTONS_PER_ROW)]
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+    También a nivel de módulo y con la misma firma, para que APScheduler la pueda guardar.
+    """
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {token}", "User-Agent": "DiscordBot (asistente, 1.0)"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with session.post(
+            url, headers=headers, json={"content": f"⏰ Recordatorio: {text}"[:2000]}
+        ) as resp:
+            resp.raise_for_status()
 
 
-@router.message(Command("recordatorios", "cancelar"))
-async def cmd_recordatorios(message: Message, reminders: ReminderService) -> None:
-    text, markup = _render_list(reminders, message.chat.id)
-    await message.answer(text, reply_markup=markup)
+@dataclass(frozen=True)
+class ReminderInfo:
+    id: str
+    text: str
+    description: str
+    recurring: bool
+    next_run: datetime | None
 
 
-@router.callback_query(F.data.startswith(CALLBACK_PREFIX))
-async def cb_cancelar(callback: CallbackQuery, reminders: ReminderService) -> None:
-    if callback.message is None:
-        await callback.answer()
-        return
-
-    chat_id = callback.message.chat.id
-    cancelled = reminders.cancel(chat_id, callback.data[len(CALLBACK_PREFIX):])
-    await callback.answer("Cancelado ✅" if cancelled else "Ese recordatorio ya no existe")
-
-    # Refresca la lista en el mismo mensaje
-    text, markup = _render_list(reminders, chat_id)
-    try:
-        await callback.message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
-        pass  # Telegram se queja si el mensaje quedó idéntico: no pasa nada
-
-
-@router.message(Command("zona"))
-async def cmd_zona(message: Message, command: CommandObject, reminders: ReminderService) -> None:
-    chat_id = message.chat.id
-    arg = (command.args or "").strip()
-
-    if not arg:
-        tz = reminders.get_timezone(chat_id)
-        if tz:
-            await message.answer(
-                f"Tu zona horaria es {tz.key} (ahora son las {datetime.now(tz):%H:%M}).\n"
-                "Para cambiarla: /zona <ciudad o zona>, por ejemplo /zona Lima"
-            )
-        else:
-            await message.answer(
-                "Todavía no tienes zona horaria 🌎\n"
-                "Escribe /zona y tu ciudad o zona, por ejemplo:\n"
-                "/zona Lima\n/zona America/Mexico_City\n/zona Europe/Madrid"
-            )
-        return
-
-    matches = find_timezones(arg)
-    if not matches:
-        await message.answer(
-            f"No encontré «{arg}» 🤔 Prueba con el nombre de tu ciudad (Lima, Bogotá, Madrid...) "
-            "o con la zona completa, como America/Argentina/Buenos_Aires."
+class ReminderService:
+    def __init__(
+        self,
+        token: str,
+        db_path: str = "reminders.db",
+        default_timezone: str | None = None,
+        discord_token: str | None = None,
+    ) -> None:
+        self.token = token
+        self.discord_token = discord_token  # Si no hay, los recordatorios pedidos desde Discord se rechazan
+        self.db_path = db_path
+        self.default_timezone = default_timezone  # Zona para chats que no han usado /zona
+        # SQLAlchemyJobStore guarda los recordatorios en disco: sobreviven a un reinicio del bot
+        self.scheduler = AsyncIOScheduler(
+            jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{db_path}")}
         )
-        return
-    if len(matches) > 1:
-        options = "\n".join(f"/zona {m}" for m in matches[:8])
-        await message.answer(f"Hay varias coincidencias, elige una:\n{options}")
-        return
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chat_settings "
+                "(chat_id INTEGER PRIMARY KEY, timezone TEXT NOT NULL)"
+            )
 
-    tz = reminders.set_timezone(chat_id, matches[0])
-    reply = f"Listo, tu zona horaria es {tz.key} (ahora son las {datetime.now(tz):%H:%M}) 🌎"
-    if reminders.list_jobs(chat_id):
-        reply += "\nLos recordatorios que ya tenías conservan su hora original."
-    await message.answer(reply)
+    def start(self) -> None:
+        self.scheduler.start()
+
+    # ---- Zona horaria por chat ----
+
+    def get_timezone(self, chat_id: int) -> ZoneInfo | None:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT timezone FROM chat_settings WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        name = row[0] if row else self.default_timezone
+        if not name:
+            return None
+        try:
+            return ZoneInfo(name)
+        except Exception:  # Zona guardada que ya no existe: se trata como no configurada
+            return None
+
+    def set_timezone(self, chat_id: int, name: str) -> ZoneInfo:
+        tz = ZoneInfo(name)  # Lanza error si no es válida
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO chat_settings (chat_id, timezone) VALUES (?, ?)",
+                (chat_id, tz.key),
+            )
+        return tz
+
+    # ---- Crear, listar y cancelar ----
+
+    def _chat_jobs(self, chat_id: int) -> list:
+        return [
+            j
+            for j in self.scheduler.get_jobs()
+            if len(j.args) >= 3 and j.args[1] == chat_id
+        ]
+
+    def create(self, chat_id: int, args: str, platform: str = "telegram") -> tuple[str, str]:
+        """Interpreta '<cuándo> <mensaje>', lo agenda y devuelve (mensaje, descripción del cuándo)."""
+        tz = self.get_timezone(chat_id)
+        schedule, text = parse_reminder(args, tz)
+
+        if len(self._chat_jobs(chat_id)) >= MAX_PER_CHAT:
+            raise ReminderError(
+                f"Ya tienes {MAX_PER_CHAT} recordatorios pendientes 😅 Cancela alguno con /recordatorios."
+            )
+
+        if platform == "discord":
+            if not self.discord_token:
+                raise ReminderError("Los recordatorios por Discord no están configurados.")
+            send, token = _send_discord_reminder, self.discord_token
+        else:
+            send, token = _send_reminder, self.token
+
+        common = {
+            "args": [token, chat_id, text],
+            "id": uuid4().hex,
+            "name": schedule.description,
+            "misfire_grace_time": 3600,  # Si el bot estuvo apagado, lo manda al volver (hasta 1h después)
+        }
+        if schedule.kind == "once":
+            self.scheduler.add_job(send, trigger="date", run_date=schedule.run_at, **common)
+        elif schedule.kind == "interval":
+            self.scheduler.add_job(
+                send,
+                trigger="interval",
+                seconds=int(schedule.interval.total_seconds()),
+                coalesce=True,  # Si se acumularon varios por estar apagado, manda uno solo
+                **common,
+            )
+        else:  # daily / weekly: cron en la zona del chat (respeta el horario de verano)
+            cron = {"hour": schedule.hour, "minute": schedule.minute, "timezone": tz.key}
+            if schedule.kind == "weekly":
+                cron["day_of_week"] = schedule.weekday
+            self.scheduler.add_job(
+                send, trigger="cron", coalesce=True, **cron, **common
+            )
+        return text, schedule.description
+
+    def list_jobs(self, chat_id: int) -> list[ReminderInfo]:
+        """Recordatorios pendientes del chat, el más próximo primero."""
+        far = datetime.max.replace(tzinfo=timezone.utc)
+        jobs = sorted(self._chat_jobs(chat_id), key=lambda j: j.next_run_time or far)
+        return [self._info(j) for j in jobs]
+
+    def cancel(self, chat_id: int, job_id: str) -> ReminderInfo | None:
+        """Cancela un recordatorio del chat. Devuelve None si no existe o es de otro chat."""
+        job = self.scheduler.get_job(job_id)
+        if job is None or len(job.args) < 3 or job.args[1] != chat_id:
+            return None
+        info = self._info(job)
+        job.remove()
+        return info
+
+    @staticmethod
+    def _info(job) -> ReminderInfo:
+        description = job.name if job.name and job.name != "_send_reminder" else "una vez"
+        return ReminderInfo(
+            id=job.id,
+            text=job.args[2],
+            description=description,
+            recurring=type(job.trigger).__name__ != "DateTrigger",
+            next_run=job.next_run_time,
+        )

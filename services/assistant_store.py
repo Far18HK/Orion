@@ -19,6 +19,10 @@ class AssistantStore:
                     id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, content TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS conversation_turns (
+                    id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, platform TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS assistant_tasks (
                     id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL
@@ -86,6 +90,53 @@ class AssistantStore:
         args.append(min(max(limit, 1), 50))
         with closing(sqlite3.connect(self.db_path)) as conn:
             return conn.execute(sql, args).fetchall()
+
+    def relevant_memories(self, user_id: int, query: str = "", limit: int = 8) -> list[tuple[str, str]]:
+        """Devuelve memorias relacionadas primero y luego las más recientes."""
+        words = [w for w in query.lower().split() if len(w) >= 3][:8]
+        max_rows = min(max(limit, 1), 20)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT id, content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+                (user_id,),
+            ).fetchall()
+        if not words:
+            return rows[:max_rows]
+        relevant = [row for row in rows if any(word in row[1].lower() for word in words)]
+        return (relevant + [row for row in rows if row not in relevant])[:max_rows]
+
+    def save_conversation_turn(self, user_id: int, platform: str, role: str, content: str) -> None:
+        """Persiste solo turnos finales; nunca guarda llamadas internas de herramientas."""
+        if role not in {"user", "assistant"} or not content.strip():
+            return
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO conversation_turns VALUES (?, ?, ?, ?, ?, ?)",
+                (uuid4().hex[:16], user_id, platform, role, content[:12000], self._now()),
+            )
+
+    def recent_conversation(self, user_id: int, platform: str, limit: int = 8) -> list[tuple[str, str]]:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM conversation_turns WHERE user_id=? AND platform=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (user_id, platform, min(max(limit, 2), 20)),
+            ).fetchall()
+        return list(reversed(rows))
+
+    def clear_conversation(self, user_id: int, platform: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "DELETE FROM conversation_turns WHERE user_id=? AND platform=?",
+                (user_id, platform),
+            )
+
+    def current_project(self, user_id: int) -> str | None:
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT name FROM projects WHERE user_id=? ORDER BY created_at DESC LIMIT 1", (user_id,)
+            ).fetchone()
+        return row[0] if row else None
 
     def forget(self, user_id: int, item_id: str) -> bool:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
