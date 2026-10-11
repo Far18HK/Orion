@@ -64,6 +64,7 @@ class AssistantStore:
                 ("last_run", "TEXT"),
                 ("last_status", "TEXT"),
                 ("last_result", "TEXT"),
+                ("timezone", "TEXT"),
             ):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE automations ADD COLUMN {name} {definition}")
@@ -205,14 +206,19 @@ class AssistantStore:
             )
 
     def add_automation(
-        self, user_id: int, instruction: str, schedule: str, next_run: datetime | None = None
+        self,
+        user_id: int,
+        instruction: str,
+        schedule: str,
+        next_run: datetime | None = None,
+        timezone: str | None = None,
     ) -> str:
         item_id = uuid4().hex[:12]
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "INSERT INTO automations "
-                "(id,user_id,instruction,schedule,enabled,created_at,next_run) "
-                "VALUES (?, ?, ?, ?, 1, ?, ?)",
+                "(id,user_id,instruction,schedule,enabled,created_at,next_run,timezone) "
+                "VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
                 (
                     item_id,
                     user_id,
@@ -220,6 +226,7 @@ class AssistantStore:
                     schedule,
                     self._now(),
                     next_run.isoformat() if next_run else None,
+                    timezone,
                 ),
             )
         return item_id
@@ -227,12 +234,18 @@ class AssistantStore:
     def due_automations(self, now: datetime) -> list[dict]:
         with closing(sqlite3.connect(self.db_path)) as conn:
             rows = conn.execute(
-                "SELECT id,user_id,instruction,schedule,next_run FROM automations "
+                "SELECT id,user_id,instruction,schedule,next_run,timezone FROM automations "
                 "WHERE enabled = 1 AND (next_run IS NULL OR next_run <= ?) LIMIT 20",
                 (now.isoformat(),),
             ).fetchall()
         return [
-            dict(zip(("id", "user_id", "instruction", "schedule", "next_run"), row, strict=True))
+            dict(
+                zip(
+                    ("id", "user_id", "instruction", "schedule", "next_run", "timezone"),
+                    row,
+                    strict=True,
+                )
+            )
             for row in rows
         ]
 

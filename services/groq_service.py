@@ -671,18 +671,27 @@ class GroqService:
         función devuelve la pregunta para el usuario; se responde con `resolve_pending`.
         """
         key = self._key(user_id, platform)
-        if interactive:
-            # Si había una acción esperando un sí/no y el usuario siguió con otra cosa, no se ejecuta
-            await self._discard_pending(user_id, platform)
-        ctx = self._build_context(user_id, platform, chat_id)
-        specs = build_tool_specs(ctx)
-        self._load_persistent_history(key, user_id, platform)
-        messages = [*self._context_messages(key, ctx, text), {"role": "user", "content": text}]
-        model = self.get_model(user_id, platform)
-        thread_id = f"{key}:{uuid4().hex[:10]}"
-        saved = saved_as or text
-        if interactive:
-            self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        try:
+            if interactive:
+                # Si había una acción esperando un sí/no y siguió con otra cosa, no se ejecuta
+                await self._discard_pending(user_id, platform)
+            ctx = self._build_context(user_id, platform, chat_id)
+            specs = build_tool_specs(ctx)
+            self._load_persistent_history(key, user_id, platform)
+            messages = [
+                *self._context_messages(key, ctx, text), {"role": "user", "content": text}
+            ]
+            model = self.get_model(user_id, platform)
+            thread_id = f"{key}:{uuid4().hex[:10]}"
+            saved = saved_as or text
+            if interactive:
+                self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        except GroqError:
+            raise
+        except Exception as e:
+            # Nunca dejar que un fallo de preparación (antes de _drive) se escape en silencio:
+            # el usuario debe recibir siempre algún mensaje, aunque sea genérico.
+            raise self._handle_error(e) from e
         return await self._drive(
             user_id,
             platform,
@@ -716,19 +725,26 @@ class GroqService:
             raise GroqError("No tengo ninguna acción esperando tu aprobación.")
         payload = record[1]
         thread_id = payload["thread_id"]
-        ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
-        specs = build_tool_specs(ctx)
-        self.store.audit(
-            user_id,
-            platform,
-            "approval",
-            ("aprobada: " if approved else "rechazada: ")
-            + "; ".join(describe_call(c["name"], c["arguments"]) for c in payload.get("calls", [])),
-        )
-        model = payload.get("model") or self.get_model(user_id, platform)
-        text, saved = payload.get("text", ""), payload.get("saved", "")
-        # Pasa a "running" ya: un segundo toque en «Aprobar» no puede ejecutarla dos veces
-        self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        try:
+            ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+            specs = build_tool_specs(ctx)
+            self.store.audit(
+                user_id,
+                platform,
+                "approval",
+                ("aprobada: " if approved else "rechazada: ")
+                + "; ".join(
+                    describe_call(c["name"], c["arguments"]) for c in payload.get("calls", [])
+                ),
+            )
+            model = payload.get("model") or self.get_model(user_id, platform)
+            text, saved = payload.get("text", ""), payload.get("saved", "")
+            # Pasa a "running" ya: un segundo toque en «Aprobar» no puede ejecutarla dos veces
+            self._save_turn(user_id, platform, "running", thread_id, ctx, model, text, saved)
+        except GroqError:
+            raise
+        except Exception as e:
+            raise self._handle_error(e) from e
         return await self._drive(
             user_id,
             platform,
@@ -751,11 +767,16 @@ class GroqService:
         thread_id = payload["thread_id"]
         if thread_id in self._active_threads:
             raise GroqError("Ese turno sigue en curso; espera a que termine.")
-        ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
-        specs = build_tool_specs(ctx)
-        model = payload.get("model") or self.get_model(user_id, platform)
-        text, saved = payload.get("text", ""), payload.get("saved", "")
-        self.store.audit(user_id, platform, "resume", f"reanudando {thread_id}")
+        try:
+            ctx = self._build_context(user_id, platform, payload.get("chat_id", chat_id))
+            specs = build_tool_specs(ctx)
+            model = payload.get("model") or self.get_model(user_id, platform)
+            text, saved = payload.get("text", ""), payload.get("saved", "")
+            self.store.audit(user_id, platform, "resume", f"reanudando {thread_id}")
+        except GroqError:
+            raise
+        except Exception as e:
+            raise self._handle_error(e) from e
         return await self._drive(
             user_id,
             platform,

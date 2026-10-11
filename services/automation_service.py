@@ -6,7 +6,8 @@ import asyncio
 import logging
 import re
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
@@ -20,8 +21,14 @@ _INTERVAL = re.compile(
 _DAILY = re.compile(r"^cada\s+(día|dia)\s+(\d{1,2}):(\d{2})$", re.IGNORECASE)
 
 
-def next_run_for(schedule: str, now: datetime | None = None) -> datetime | None:
-    """Convierte frecuencias seguras de intervalo en una próxima ejecución."""
+def next_run_for(
+    schedule: str, now: datetime | None = None, tz: tzinfo | None = None
+) -> datetime | None:
+    """Convierte frecuencias seguras de intervalo en una próxima ejecución (en UTC).
+
+    `tz` es la zona horaria del chat: "cada día 08:00" significa 08:00 en esa
+    zona, no en UTC. Si no se conoce la zona, se asume UTC (comportamiento previo).
+    """
     now = now or datetime.now(UTC)
     value = schedule.strip()
     daily = _DAILY.match(value)
@@ -29,8 +36,11 @@ def next_run_for(schedule: str, now: datetime | None = None) -> datetime | None:
         hour, minute = int(daily.group(2)), int(daily.group(3))
         if hour > 23 or minute > 59:
             return None
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return candidate if candidate > now else candidate + timedelta(days=1)
+        local_now = now.astimezone(tz or UTC)
+        candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= local_now:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(UTC)
     match = _INTERVAL.match(value)
     if not match:
         return None
@@ -44,6 +54,15 @@ def next_run_for(schedule: str, now: datetime | None = None) -> datetime | None:
     else:
         delta = timedelta(days=amount)
     return now + delta
+
+
+def _tz_from_name(name: str | None) -> tzinfo | None:
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 — zona guardada que ya no existe: se trata como UTC
+        return None
 
 
 class AutomationService:
@@ -105,5 +124,6 @@ class AutomationService:
             logger.exception("Automatización %s falló", item_id)
             status = "error"
             details = str(exc)
-        next_run = next_run_for(automation["schedule"], now)
+        tz = _tz_from_name(automation.get("timezone"))
+        next_run = next_run_for(automation["schedule"], now, tz)
         self.store.finish_automation(item_id, next_run, status, details)

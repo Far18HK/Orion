@@ -29,6 +29,8 @@ from services.discord_monitor import (
 )
 from services.assistant_store import AssistantStore
 from services.automation_service import next_run_for
+
+_DAILY_SCHEDULE = re.compile(r"^cada\s+(día|dia)\s+(\d{1,2}):(\d{2})$", re.IGNORECASE)
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderService
@@ -650,10 +652,18 @@ async def _t_create_automation(ctx: ToolContext, args: dict) -> str:
     schedule = str(args.get("schedule", "")).strip()
     if not instruction or not schedule:
         return "Error: indica la instrucción y el horario."
-    first_run = next_run_for(schedule)
+    tz = ctx.reminders.get_timezone(ctx.chat_id) if ctx.reminders else None
+    if _DAILY_SCHEDULE.match(schedule) and tz is None:
+        return (
+            "Error: para un horario diario como 'cada día 08:00' necesito tu zona "
+            "horaria primero. Mándame /zona, por ejemplo: /zona America/Mexico_City"
+        )
+    first_run = next_run_for(schedule, tz=tz)
     if first_run is None:
         return "Error: usa un horario como 'cada 30m', 'cada 2 horas' o 'cada día 08:00'."
-    item_id = ctx.store.add_automation(ctx.user_id, instruction, schedule, first_run)
+    item_id = ctx.store.add_automation(
+        ctx.user_id, instruction, schedule, first_run, tz.key if tz else None
+    )
     return f"Automatización registrada con id {item_id}. La revisaré según {schedule}."
 
 
