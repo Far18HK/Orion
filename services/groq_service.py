@@ -19,6 +19,7 @@ from services.github import GitHubService
 from services.notion import NotionService
 from services.reasoning_harness import HarnessPolicy, ReasoningHarness
 from services.pydantic_harness import PydanticHarness
+from services.agent_router import PROFILES, filter_specs, route
 from services.reminders import ReminderService
 from services.tools import (
     TOOLS,
@@ -406,6 +407,11 @@ class GroqService:
                 "content": f"{SYSTEM_PROMPT}\nAhora es {format_now(now)} (zona: {zone}).",
             }
         ]
+        profile = PROFILES.get(ctx.agent_name, PROFILES["general"])
+        if profile.name != "general":
+            messages.append(
+                {"role": "system", "content": f"Agente especializado activo: {profile.name}. {profile.instructions}"}
+            )
         brain_mode = self._brain_modes.get(user_id, 0)
         if brain_mode >= 2:
             messages.append(
@@ -670,7 +676,8 @@ class GroqService:
         return name in self.approval_tools or name in DEFAULT_SENSITIVE_TOOLS
 
     def _build_context(
-        self, user_id: int, platform: str, chat_id: int | None, guild_id: int | None = None
+        self, user_id: int, platform: str, chat_id: int | None, guild_id: int | None = None,
+        agent_name: str = "general",
     ) -> ToolContext:
         """Qué puede hacer el agente en este turno (permisos por usuario y plataforma)."""
         return ToolContext(
@@ -725,6 +732,7 @@ class GroqService:
             ),
             store=self.store,
             workspace_root=self.workspace_root,
+            agent_name=agent_name,
         )
 
     async def _structured_plan(self, objective: str, user_id: int, platform: str) -> str:
@@ -785,8 +793,9 @@ class GroqService:
             if interactive:
                 # Si había una acción esperando un sí/no y siguió con otra cosa, no se ejecuta
                 await self._discard_pending(user_id, platform)
-            ctx = self._build_context(user_id, platform, chat_id, guild_id)
-            specs = build_tool_specs(ctx)
+            profile = route(text)
+            ctx = self._build_context(user_id, platform, chat_id, guild_id, profile.name)
+            specs = filter_specs(build_tool_specs(ctx), profile)
             self._load_persistent_history(key, user_id, platform)
             messages = [
                 *self._context_messages(key, ctx, text), {"role": "user", "content": text}
@@ -850,10 +859,11 @@ class GroqService:
         payload = record[1]
         thread_id = payload["thread_id"]
         try:
+            agent_name = payload.get("agent_name", "general")
             ctx = self._build_context(
-                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id)
+                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id), agent_name
             )
-            specs = build_tool_specs(ctx)
+            specs = filter_specs(build_tool_specs(ctx), PROFILES.get(agent_name, PROFILES["general"]))
             self.store.audit(
                 user_id,
                 platform,
@@ -899,10 +909,11 @@ class GroqService:
         if thread_id in self._active_threads:
             raise GroqError("Ese turno sigue en curso; espera a que termine.")
         try:
+            agent_name = payload.get("agent_name", "general")
             ctx = self._build_context(
-                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id)
+                user_id, platform, payload.get("chat_id", chat_id), payload.get("guild_id", guild_id), agent_name
             )
-            specs = build_tool_specs(ctx)
+            specs = filter_specs(build_tool_specs(ctx), PROFILES.get(agent_name, PROFILES["general"]))
             model = payload.get("model") or self.get_model(user_id, platform)
             text, saved = payload.get("text", ""), payload.get("saved", "")
             run_id = payload.get("run_id")
@@ -951,6 +962,7 @@ class GroqService:
                 "saved": saved[:1000],
                 "calls": calls or [],
                 "run_id": run_id,
+                "agent_name": ctx.agent_name,
             },
         )
 

@@ -91,6 +91,7 @@ class ToolContext:
     verifier_runner: Callable[[str, str, str], Awaitable[str]] | None = None
     store: AssistantStore | None = None
     workspace_root: str | None = None
+    agent_name: str = "general"
 
 
 def format_now(now: datetime) -> str:
