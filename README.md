@@ -21,6 +21,7 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
 - Ejecuciones autónomas persistentes consultables con `/ejecuciones` y cancelables con `/cancelar_ejecucion <id>`, con presupuesto de herramientas por turno.
 - Espacio de archivos privado por usuario: recibe adjuntos de cualquier extensión, conserva binarios, inspecciona texto y ZIP, crea archivos de texto o binarios Base64 y comprime archivos.
+- Dispatcher interno con agentes especializados de archivos, Discord, código, investigación y multimedia; cada turno recibe solo las herramientas necesarias.
 - Aprobación humana real (`/aprobar`, `/rechazar` o botones) para acciones con efectos, y `/reanudar` para retomar un turno interrumpido.
 - Por seguridad, Orion también pide aprobación para DMs de Discord, editar/borrar notas y cancelar recordatorios.
 
@@ -57,6 +58,10 @@ Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura tam
 ## Archivos y espacio de trabajo
 
 Cada usuario tiene un directorio aislado dentro de `WORKSPACE_DIR` (por defecto `orion_workspace`). Los adjuntos se guardan en `inbox/` aunque Orion todavía no tenga un extractor semántico específico para su formato. El agente puede usar `list_files` y `read_file` para texto y ZIP; puede crear archivos con `write_file`, crear binarios a partir de Base64 con `write_binary_file` y empaquetar con `zip_files`. Los archivos creados se devuelven automáticamente por Telegram.
+
+## Agentes especializados
+
+Orion conserva un único bot visible, pero un Dispatcher interno selecciona el perfil adecuado para cada turno: `files`, `discord`, `coding`, `research` o `media`. El perfil limita las herramientas que el modelo puede ver, añade instrucciones específicas y se conserva si el turno queda pendiente de aprobación o reanudación. Las tareas generales usan `general` con el catálogo completo. La separación es lógica dentro del proceso; no crea bots ni tokens adicionales y mantiene memoria, auditoría y aprobaciones compartidas.
 
 Por seguridad, las rutas no pueden salir del espacio del usuario, los archivos están limitados a 50 MB, crear/sobrescribir, generar binarios y comprimir requieren aprobación humana, y Orion nunca ejecuta automáticamente código, macros, ejecutables o scripts recibidos. Para conservar archivos en Railway, configura `WORKSPACE_DIR=/data/orion_workspace` en el mismo Volume persistente de la base de datos.
 
