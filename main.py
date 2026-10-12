@@ -106,6 +106,7 @@ async def main() -> None:
         store=assistant_store,
         checkpointer=checkpointer,
         approval_tools=settings.approval_tools,
+        workspace_root=settings.workspace_dir,
     )
     dp["ai"] = ai
     automation_service = AutomationService(

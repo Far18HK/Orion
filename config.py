@@ -47,6 +47,7 @@ class Settings:
     github_token: str | None  # Token de solo lectura; sin él no hay herramientas de GitHub
     github_owner_ids: frozenset[int]  # Ids de Telegram con permiso de ver tus repos
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
+    workspace_dir: str
     approval_tools: frozenset[str]  # Herramientas que pausan el turno hasta que el usuario apruebe
 
 
@@ -227,5 +228,6 @@ def load_settings() -> Settings:
         github_token=github_token,
         github_owner_ids=github_owner_ids,
         db_path=db_path,
+        workspace_dir=os.getenv("WORKSPACE_DIR") or os.path.join(os.path.dirname(db_path) or ".", "orion_workspace"),
         approval_tools=approval_tools,
     )

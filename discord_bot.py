@@ -7,10 +7,12 @@ import logging
 import time
 from collections import defaultdict, deque
 
+import aiohttp
 import discord
 
 from handlers.chat import split_text
 from services.groq_service import GroqError, GroqService
+from services.workspace import WorkspaceError, save_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,26 @@ class DiscordFront(discord.Client):
         for mention in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
             text = text.replace(mention, "")
         text = text.strip()
+        if message.attachments:
+            saved = []
+            try:
+                async with aiohttp.ClientSession() as session:
+                    for attachment in message.attachments[:10]:
+                        async with session.get(attachment.url) as response:
+                            if response.status >= 400:
+                                raise WorkspaceError(f"Discord no permitió descargar {attachment.filename}.")
+                            data = await response.read()
+                        if len(data) > 50 * 1024 * 1024:
+                            raise WorkspaceError(f"{attachment.filename} supera 50 MB.")
+                        saved.append(save_attachment(self.ai.workspace_root, message.author.id, attachment.filename, data, "discord"))
+            except (WorkspaceError, aiohttp.ClientError) as exc:
+                await message.reply(f"No pude guardar el adjunto: {exc}")
+                return
+            prompt = text or "Inspecciona los archivos que acabo de enviar y dime qué puedes hacer con ellos."
+            text = (
+                f"Recibí estos archivos: {', '.join(p.name for p in saved)}. "
+                f"Están en inbox/. Petición: {prompt} Usa list_files/read_file; no inventes contenido."
+            )
         if not text:
             await message.reply(HELP_TEXT)
             return

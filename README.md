@@ -20,6 +20,7 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Arquitectura híbrida: LangGraph conserva el flujo durable, las interrupciones y la reanudación; PydanticAI aporta planes y verificaciones tipadas mediante `plan_task` y `verify_step`.
 - Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
 - Ejecuciones autónomas persistentes consultables con `/ejecuciones` y cancelables con `/cancelar_ejecucion <id>`, con presupuesto de herramientas por turno.
+- Espacio de archivos privado por usuario: recibe adjuntos de cualquier extensión, conserva binarios, inspecciona texto y ZIP, crea archivos de texto o binarios Base64 y comprime archivos.
 - Aprobación humana real (`/aprobar`, `/rechazar` o botones) para acciones con efectos, y `/reanudar` para retomar un turno interrumpido.
 - Por seguridad, Orion también pide aprobación para DMs de Discord, editar/borrar notas y cancelar recordatorios.
 
@@ -52,6 +53,12 @@ memoria sobreviva despliegues en Railway, usa un Volume persistente.
 Para un bot privado, configura `ALLOWED_USER_IDS`. Si es público, configura también `DAILY_MESSAGE_LIMIT` para proteger la cuota de Groq.
 
 `DISCORD_DM_IDS` debe contener los IDs de Discord autorizados a recibir mensajes directos. En Discord, escribe `id` al bot para obtener tu ID.
+
+## Archivos y espacio de trabajo
+
+Cada usuario tiene un directorio aislado dentro de `WORKSPACE_DIR` (por defecto `orion_workspace`). Los adjuntos se guardan en `inbox/` aunque Orion todavía no tenga un extractor semántico específico para su formato. El agente puede usar `list_files` y `read_file` para texto y ZIP; puede crear archivos con `write_file`, crear binarios a partir de Base64 con `write_binary_file` y empaquetar con `zip_files`. Los archivos creados se devuelven automáticamente por Telegram.
+
+Por seguridad, las rutas no pueden salir del espacio del usuario, los archivos están limitados a 50 MB, crear/sobrescribir, generar binarios y comprimir requieren aprobación humana, y Orion nunca ejecuta automáticamente código, macros, ejecutables o scripts recibidos. Para conservar archivos en Railway, configura `WORKSPACE_DIR=/data/orion_workspace` en el mismo Volume persistente de la base de datos.
 
 Para que Orion pueda revisar Discord cuando se lo pidas, configura `DISCORD_MONITOR_CHANNEL_IDS` con los IDs de canales permitidos, `DISCORD_MONITOR_USER_IDS` para usuarios de Discord y/o `DISCORD_MONITOR_TELEGRAM_IDS` para usuarios de Telegram. La lectura es bajo demanda; no se mantiene una vigilancia permanente.
 
