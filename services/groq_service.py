@@ -74,6 +74,10 @@ SYSTEM_PROMPT = (
     "- Nunca digas que hiciste algo (recordatorio, nota, cancelación) si la herramienta no "
     "confirmó éxito. Si falló, dilo y corrige o explica el motivo.\n"
     "- Al terminar una acción, confirma en una línea qué quedó hecho y para cuándo, sin discursos largos.\n"
+    "- Para archivos usa list_files y read_file. Para crear archivos usa write_file; para binarios "
+    "solo usa write_binary_file si tienes Base64 real, y para empaquetar usa zip_files. Nunca ejecutes "
+    "un .py, .sh, .exe, macro o binario por tu cuenta. Al crear un archivo conserva literalmente "
+    "ARCHIVO_CREADO:ruta en la respuesta final para que el sistema pueda entregárselo al usuario.\n"
     "- Cuando el usuario diga explícitamente que algo es una preferencia, dato estable, objetivo, "
     "proyecto o regla personal, guárdalo con remember. No guardes cada comentario casual ni datos "
     "sensibles salvo que el usuario lo pida claramente. Antes de guardar, evita duplicados obvios. "
@@ -117,6 +121,9 @@ DEFAULT_SENSITIVE_TOOLS = frozenset({
     "create_discord_event",
     "timeout_discord_member",
     "delete_discord_message",
+    "write_file",
+    "write_binary_file",
+    "zip_files",
 })
 
 
@@ -156,6 +163,7 @@ class GroqService:
         checkpointer=None,
         approval_tools: frozenset[str] = frozenset(),
         pydantic_enabled: bool = True,
+        workspace_root: str = "orion_workspace",
     ) -> None:
         if not api_keys:
             raise ValueError("GroqService necesita al menos una API key de Groq")
@@ -199,6 +207,7 @@ class GroqService:
         if self.multi_brain_size == 1:
             self.multi_brain_size = 0
         self.store = store
+        self.workspace_root = workspace_root
         self.pydantic_harness: PydanticHarness | None = None
         enabled = pydantic_enabled and os.getenv("PYDANTICAI_ENABLED", "true").lower() not in {
             "0", "false", "no"
@@ -715,6 +724,7 @@ class GroqService:
                 else None
             ),
             store=self.store,
+            workspace_root=self.workspace_root,
         )
 
     async def _structured_plan(self, objective: str, user_id: int, platform: str) -> str:

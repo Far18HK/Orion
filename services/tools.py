@@ -41,6 +41,15 @@ from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
 from services.reminders import ReminderService
 from services.schedule_parser import ReminderError, find_timezones, format_when
+from services.workspace import (
+    WorkspaceError,
+    describe_file,
+    list_files,
+    make_zip,
+    safe_path,
+    write_base64,
+    write_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +90,7 @@ class ToolContext:
     planner_runner: Callable[[str], Awaitable[str]] | None = None
     verifier_runner: Callable[[str, str, str], Awaitable[str]] | None = None
     store: AssistantStore | None = None
+    workspace_root: str | None = None
 
 
 def format_now(now: datetime) -> str:
@@ -725,6 +735,63 @@ async def _t_verify_step(ctx: ToolContext, args: dict) -> str:
     return await ctx.verifier_runner(objective, expected, evidence)
 
 
+def _workspace_required(ctx: ToolContext) -> str:
+    if not ctx.workspace_root:
+        raise WorkspaceError("El espacio de trabajo no está configurado.")
+    return ctx.workspace_root
+
+
+async def _t_list_files(ctx: ToolContext, args: dict) -> str:
+    try:
+        return list_files(_workspace_required(ctx), ctx.user_id, ctx.platform)
+    except WorkspaceError as exc:
+        return f"Error: {exc}"
+
+
+async def _t_read_file(ctx: ToolContext, args: dict) -> str:
+    try:
+        path = safe_path(_workspace_required(ctx), ctx.user_id, str(args.get("path", "")), ctx.platform)
+        if not path.is_file():
+            return "Error: ese archivo no existe. Usa list_files primero."
+        return describe_file(path)
+    except (WorkspaceError, OSError) as exc:
+        return f"Error: {exc}"
+
+
+async def _t_write_file(ctx: ToolContext, args: dict) -> str:
+    try:
+        path = write_text(
+            _workspace_required(ctx), ctx.user_id, str(args.get("path", "")),
+            str(args.get("content", "")), ctx.platform,
+        )
+        return f"ARCHIVO_CREADO:{path}\nArchivo de texto creado correctamente: {path.name}"
+    except WorkspaceError as exc:
+        return f"Error: {exc}"
+
+
+async def _t_write_binary_file(ctx: ToolContext, args: dict) -> str:
+    try:
+        path = write_base64(
+            _workspace_required(ctx), ctx.user_id, str(args.get("path", "")),
+            str(args.get("base64", "")), ctx.platform,
+        )
+        return f"ARCHIVO_CREADO:{path}\nArchivo binario creado correctamente: {path.name}"
+    except WorkspaceError as exc:
+        return f"Error: {exc}"
+
+
+async def _t_zip_files(ctx: ToolContext, args: dict) -> str:
+    try:
+        files = [str(item) for item in (args.get("files") or [])]
+        path = make_zip(
+            _workspace_required(ctx), ctx.user_id, str(args.get("output", "archivos.zip")),
+            files, ctx.platform,
+        )
+        return f"ARCHIVO_CREADO:{path}\nZIP creado con {len(files)} archivo(s): {path.name}"
+    except WorkspaceError as exc:
+        return f"Error: {exc}"
+
+
 async def _t_create_automation(ctx: ToolContext, args: dict) -> str:
     if ctx.store is None:
         return "El gestor de automatizaciones no está configurado."
@@ -1034,6 +1101,31 @@ TOOLS: list[Tool] = [
         ("objective", "expected_result", "evidence"),
         _t_verify_step,
         needs="verifier_runner",
+    ),
+    Tool("list_files", "Lista los archivos del espacio de trabajo privado del usuario.", {}, (), _t_list_files, needs="workspace_root"),
+    Tool(
+        "read_file",
+        "Lee un archivo recibido o creado. Para texto muestra contenido; para ZIP muestra su inventario; para binarios muestra metadatos.",
+        {"path": _str("Ruta relativa del archivo; usa list_files primero.")},
+        ("path",), _t_read_file, needs="workspace_root",
+    ),
+    Tool(
+        "write_file",
+        "Crea o reemplaza un archivo de texto en el espacio privado. Requiere aprobación antes de sobrescribir un archivo existente.",
+        {"path": _str("Ruta relativa, incluyendo extensión."), "content": _str("Contenido completo del archivo.")},
+        ("path", "content"), _t_write_file, needs="workspace_root",
+    ),
+    Tool(
+        "write_binary_file",
+        "Crea un archivo binario desde Base64 (audio, vídeo, imagen, ZIP, etc.). Úsala solo si tienes el contenido Base64 real.",
+        {"path": _str("Ruta relativa, incluyendo extensión."), "base64": _str("Contenido Base64 exacto.")},
+        ("path", "base64"), _t_write_binary_file, needs="workspace_root",
+    ),
+    Tool(
+        "zip_files",
+        "Comprime archivos existentes del espacio de trabajo en un ZIP.",
+        {"output": _str("Nombre del ZIP de salida."), "files": {"type": "array", "items": {"type": "string"}}},
+        ("output", "files"), _t_zip_files, needs="workspace_root",
     ),
     Tool("create_automation", "Registra una automatización futura, sin ejecutarla todavía.", {"instruction": _str("Qué debe hacer."), "schedule": _str("Horario o frecuencia.")}, ("instruction", "schedule"), _t_create_automation, needs="store"),
     Tool("audit_log", "Muestra acciones recientes del asistente.", {"limit": {"type": "integer"}}, (), _t_audit, needs="store"),
