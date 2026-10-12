@@ -1,9 +1,11 @@
 """Handler principal: cualquier texto se envía al proveedor activo."""
 import asyncio
 import logging
+import re
+from pathlib import Path
 
 from aiogram import Router
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from services.groq_service import GroqError, GroqService
@@ -33,6 +35,11 @@ async def send_answer(target: Message, ai: GroqService, user_id: int, answer: st
     for index, chunk in enumerate(chunks):
         pending = index == len(chunks) - 1 and ai.has_pending_approval(user_id)
         await target.answer(chunk, parse_mode=None, reply_markup=approval_keyboard() if pending else None)
+    created = re.findall(r"ARCHIVO_CREADO:(\S+)", answer)
+    for raw_path in dict.fromkeys(created):
+        path = Path(raw_path)
+        if path.is_file() and path.stat().st_size <= 50 * 1024 * 1024:
+            await target.answer_document(FSInputFile(path), caption=f"Archivo listo: {path.name}")
 
 
 @router.message()  # Sin filtro: atrapa todo lo que no manejaron los routers anteriores
