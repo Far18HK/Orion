@@ -81,6 +81,8 @@ class ToolContext:
     discord_monitor_token: str | None = None  # Solo para usuarios autorizados a leer canales
     discord_monitor_channel_ids: frozenset[int] = frozenset()
     discord_write_channel_ids: frozenset[int] = frozenset()
+    discord_monitor_all_channels: bool = False
+    discord_write_all_channels: bool = False
     discord_moderator_token: str | None = None
     discord_moderator_guild_ids: frozenset[int] = frozenset()
     discord_guild_id: int | None = None
@@ -556,6 +558,7 @@ async def _t_read_discord_channel(ctx: ToolContext, args: dict) -> str:
             ctx.discord_monitor_channel_ids,
             limit=int(args.get("limit", 25)),
             query=str(args.get("query", "")),
+            allow_all_channels=ctx.discord_monitor_all_channels,
         )
     except (DiscordMonitorError, ValueError) as e:
         return f"Error: {e}"
@@ -575,6 +578,7 @@ async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
             int(raw_channel),
             ctx.discord_write_channel_ids,
             str(args.get("text", "")),
+            allow_all_channels=ctx.discord_write_all_channels,
         )
     except (DiscordMonitorError, ValueError) as e:
         return f"Error: {e}"

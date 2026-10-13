@@ -20,9 +20,10 @@ async def read_recent_messages(
     allowed_channel_ids: frozenset[int],
     limit: int = 25,
     query: str = "",
+    allow_all_channels: bool = False,
 ) -> str:
-    """Lee mensajes recientes de un canal explícitamente permitido."""
-    if channel_id not in allowed_channel_ids:
+    """Lee mensajes recientes; el acceso global depende además de permisos del bot en Discord."""
+    if not allow_all_channels and channel_id not in allowed_channel_ids:
         raise DiscordMonitorError(
             "Ese canal no está autorizado. Añade su ID a DISCORD_MONITOR_CHANNEL_IDS."
         )
@@ -72,9 +73,10 @@ async def send_channel_message(
     channel_id: int,
     allowed_channel_ids: frozenset[int],
     content: str,
+    allow_all_channels: bool = False,
 ) -> str:
-    """Envía un mensaje a un canal explícitamente autorizado."""
-    if channel_id not in allowed_channel_ids:
+    """Envía un mensaje; Discord sigue siendo la autoridad final de permisos."""
+    if not allow_all_channels and channel_id not in allowed_channel_ids:
         raise DiscordMonitorError(
             "Ese canal no está autorizado para escritura. Añade su ID a DISCORD_WRITE_CHANNEL_IDS."
         )

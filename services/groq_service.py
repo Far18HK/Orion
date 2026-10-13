@@ -155,6 +155,8 @@ class GroqService:
         discord_monitor_telegram_ids: frozenset[int] = frozenset(),
         discord_monitor_channel_ids: frozenset[int] = frozenset(),
         discord_write_channel_ids: frozenset[int] = frozenset(),
+        discord_monitor_all_channels: bool = False,
+        discord_write_all_channels: bool = False,
         discord_moderator_user_ids: frozenset[int] = frozenset(),
         discord_moderator_telegram_ids: frozenset[int] = frozenset(),
         discord_moderator_guild_ids: frozenset[int] = frozenset(),
@@ -200,6 +202,8 @@ class GroqService:
         self.discord_monitor_telegram_ids = discord_monitor_telegram_ids
         self.discord_monitor_channel_ids = discord_monitor_channel_ids
         self.discord_write_channel_ids = discord_write_channel_ids
+        self.discord_monitor_all_channels = discord_monitor_all_channels
+        self.discord_write_all_channels = discord_write_all_channels
         self.discord_moderator_user_ids = discord_moderator_user_ids
         self.discord_moderator_telegram_ids = discord_moderator_telegram_ids
         self.discord_moderator_guild_ids = discord_moderator_guild_ids
@@ -707,6 +711,8 @@ class GroqService:
             ),
             discord_monitor_channel_ids=self.discord_monitor_channel_ids,
             discord_write_channel_ids=self.discord_write_channel_ids,
+            discord_monitor_all_channels=self.discord_monitor_all_channels,
+            discord_write_all_channels=self.discord_write_all_channels,
             discord_moderator_token=(
                 self.discord_token
                 if (
