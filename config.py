@@ -39,6 +39,8 @@ class Settings:
     discord_monitor_telegram_ids: frozenset[int]  # Usuarios de Telegram autorizados a leer Discord
     discord_monitor_channel_ids: frozenset[int]  # Canales de Discord que se pueden consultar
     discord_write_channel_ids: frozenset[int]  # Canales de Discord donde se puede escribir
+    discord_monitor_all_channels: bool
+    discord_write_all_channels: bool
     discord_moderator_user_ids: frozenset[int]
     discord_moderator_telegram_ids: frozenset[int]
     discord_moderator_guild_ids: frozenset[int]
@@ -154,6 +156,8 @@ def load_settings() -> Settings:
             ) from None
 
     discord_token = os.getenv("DISCORD_TOKEN") or None
+    discord_monitor_all_channels = os.getenv("DISCORD_MONITOR_ALL_CHANNELS", "false").lower() not in {"0", "false", "no"}
+    discord_write_all_channels = os.getenv("DISCORD_WRITE_ALL_CHANNELS", "false").lower() not in {"0", "false", "no"}
     try:
         discord_dm_ids = frozenset(
             int(x) for x in os.getenv("DISCORD_DM_IDS", "").replace(" ", "").split(",") if x
@@ -220,6 +224,8 @@ def load_settings() -> Settings:
         discord_monitor_telegram_ids=discord_monitor_telegram_ids,
         discord_monitor_channel_ids=discord_monitor_channel_ids,
         discord_write_channel_ids=discord_write_channel_ids,
+        discord_monitor_all_channels=discord_monitor_all_channels,
+        discord_write_all_channels=discord_write_all_channels,
         discord_moderator_user_ids=discord_moderator_user_ids,
         discord_moderator_telegram_ids=discord_moderator_telegram_ids,
         discord_moderator_guild_ids=discord_moderator_guild_ids,

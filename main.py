@@ -98,6 +98,8 @@ async def main() -> None:
         discord_monitor_telegram_ids=settings.discord_monitor_telegram_ids,
         discord_monitor_channel_ids=settings.discord_monitor_channel_ids,
         discord_write_channel_ids=settings.discord_write_channel_ids,
+        discord_monitor_all_channels=settings.discord_monitor_all_channels,
+        discord_write_all_channels=settings.discord_write_all_channels,
         discord_moderator_user_ids=settings.discord_moderator_user_ids,
         discord_moderator_telegram_ids=settings.discord_moderator_telegram_ids,
         discord_moderator_guild_ids=settings.discord_moderator_guild_ids,
