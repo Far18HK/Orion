@@ -2,7 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from services.workspace import WorkspaceError, describe_file, list_files, make_zip, save_attachment, safe_path, write_text
+from services.workspace import (
+    WorkspaceError,
+    describe_file,
+    list_files,
+    make_zip,
+    safe_path,
+    save_attachment,
+    write_text,
+)
 
 
 def test_workspace_isolates_users_and_blocks_traversal(tmp_path: Path):
@@ -20,3 +28,5 @@ def test_workspace_reads_text_and_creates_zip(tmp_path: Path):
     assert "print('hola')" in describe_file(safe_path(tmp_path, 10, "src/a.py"))
     archive = make_zip(tmp_path, 10, "entrega.zip", ["src/a.py", "README.md"])
     assert archive.exists() and archive.stat().st_size > 0
+    with pytest.raises(WorkspaceError):
+        make_zip(tmp_path, 10, "entrega.zip", ["entrega.zip"])

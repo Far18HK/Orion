@@ -29,3 +29,12 @@ def test_default_approval_tools_exist():
 def test_checkpoint_db_lives_next_to_main_db():
     assert resolve_checkpoint_path("/data/reminders.db") == "/data/orion_checkpoints.db"
     assert resolve_checkpoint_path("reminders.db") == "orion_checkpoints.db"
+
+
+def test_approval_policy_is_documented_as_automatic():
+    from pathlib import Path
+
+    source = Path(__file__).parents[1] / "services" / "groq_service.py"
+    text = source.read_text(encoding="utf-8")
+    assert "return False" in text[text.index("def _needs_approval"):text.index("def _build_context")]
+    assert "action_notice" in text
