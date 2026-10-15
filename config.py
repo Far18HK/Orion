@@ -52,6 +52,7 @@ class Settings:
     db_path: str  # Archivo SQLite de recordatorios y zonas horarias (debe estar en un disco persistente)
     workspace_dir: str
     approval_tools: frozenset[str]  # Herramientas que pausan el turno hasta que el usuario apruebe
+    approval_bypass_user_ids: frozenset[int]  # IDs autorizados para omitir aprobaciones salvo excepciones
 
 
 def resolve_db_path(env: Mapping[str, str]) -> str:
@@ -136,6 +137,13 @@ def load_settings() -> Settings:
         )
     except ValueError:
         raise RuntimeError("ALLOWED_USER_IDS debe ser una lista de números: 123456,789012") from None
+    try:
+        raw_bypass_ids = os.getenv("APPROVAL_BYPASS_USER_IDS", "") or os.getenv("ALLOWED_USER_IDS", "")
+        approval_bypass_user_ids = frozenset(
+            int(x) for x in raw_bypass_ids.replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError("APPROVAL_BYPASS_USER_IDS debe ser una lista de números: 123456,789012") from None
     daily_message_limit = max(int(os.getenv("DAILY_MESSAGE_LIMIT", "0")), 0)
     require_approval_for_discord = os.getenv("REQUIRE_APPROVAL_FOR_DISCORD", "true").lower() not in {"0", "false", "no"}
     automations_enabled = os.getenv("AUTOMATIONS_ENABLED", "true").lower() not in {"0", "false", "no"}
@@ -244,4 +252,5 @@ def load_settings() -> Settings:
         db_path=db_path,
         workspace_dir=os.getenv("WORKSPACE_DIR") or os.path.join(os.path.dirname(db_path) or ".", "orion_workspace"),
         approval_tools=approval_tools,
+        approval_bypass_user_ids=approval_bypass_user_ids,
     )

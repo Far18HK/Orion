@@ -139,6 +139,7 @@ class DiscordFront(discord.Client):
                         chat_id=message.channel.id,
                         platform="discord",
                         guild_id=message.guild.id if message.guild else None,
+                        action_notice=message.channel.send,
                     )
             except GroqError as e:
                 await message.reply(str(e))

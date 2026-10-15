@@ -1,5 +1,13 @@
 # Integración de los tres módulos nuevos en Orion
 
+## Entrega de archivos creados
+
+El harness conserva las rutas `ARCHIVO_CREADO:` emitidas por las herramientas y las añade a la respuesta final si el modelo las omitió. El handler de Telegram las usa para enviar el archivo real mediante `answer_document`, incluyendo rutas con espacios.
+
+## Ejecución autónoma y riesgos
+
+Orion ya no pausa las acciones ni solicita aprobación. Antes de ejecutar una acción con efectos (por ejemplo, escribir archivos, crear recordatorios, publicar en Discord o enviar mensajes), envía un aviso con la acción y sus riesgos. Después continúa automáticamente y registra el resultado en la auditoría.
+
 ## Archivos añadidos
 
 | Archivo | Qué hace |

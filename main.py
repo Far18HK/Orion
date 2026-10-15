@@ -110,6 +110,7 @@ async def main() -> None:
         store=assistant_store,
         checkpointer=checkpointer,
         approval_tools=settings.approval_tools,
+        approval_bypass_user_ids=settings.approval_bypass_user_ids,
         workspace_root=settings.workspace_dir,
         metrics=MetricsStore(settings.db_path),
     )
