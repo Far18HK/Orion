@@ -3,8 +3,8 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from services.groq_service import GroqError, GroqService, is_chat_model
 from handlers.telegram_utils import send_long_answer
+from services.groq_service import GroqError, GroqService, is_chat_model
 
 router = Router()
 

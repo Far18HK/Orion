@@ -8,8 +8,8 @@ from aiogram import Router
 from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.chat_action import ChatActionSender
 
+from handlers.telegram_utils import split_text
 from services.groq_service import GroqError, GroqService
-from handlers.telegram_utils import send_long_answer, split_text
 
 router = Router()
 
@@ -29,6 +29,10 @@ def approval_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _file_ready(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size <= 50 * 1024 * 1024
+
+
 async def send_answer(target: Message, ai: GroqService, user_id: int, answer: str) -> None:
     """Envía la respuesta en trozos; si el turno quedó esperando aprobación, añade los botones."""
     chunks = split_text(answer)
@@ -38,7 +42,8 @@ async def send_answer(target: Message, ai: GroqService, user_id: int, answer: st
     created = re.findall(r"ARCHIVO_CREADO:(\S+)", answer)
     for raw_path in dict.fromkeys(created):
         path = Path(raw_path)
-        if path.is_file() and path.stat().st_size <= 50 * 1024 * 1024:
+        valid_file = await asyncio.to_thread(_file_ready, path)
+        if valid_file:
             await target.answer_document(FSInputFile(path), caption=f"Archivo listo: {path.name}")
 
 

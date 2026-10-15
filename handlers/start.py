@@ -5,6 +5,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, Message
 
 from services.groq_service import GroqService
+from services.metrics import MetricsStore
 
 router = Router()
 
@@ -27,6 +28,8 @@ COMMANDS = [
     ("reanudar", "Retoma un turno que quedó a medias tras un reinicio"),
     ("ejecuciones", "Muestra ejecuciones autónomas recientes"),
     ("cancelar_ejecucion", "Cancela una ejecución autónoma por id"),
+    ("archivos", "Ve, borra o limpia tu espacio de archivos"),
+    ("metricas", "Estadísticas de uso de Orion (últimos 7 días)"),
     ("reset", "Borra la memoria de esta conversación"),
 ]
 BOT_COMMANDS = [BotCommand(command=name, description=desc) for name, desc in COMMANDS]
@@ -107,6 +110,17 @@ async def cmd_proyecto(message: Message, command: CommandObject, ai: GroqService
         return
     selected = ai.set_project(message.from_user.id, name)
     await message.answer(f"Proyecto activo: {selected}.")
+
+
+@router.message(Command("metricas"))
+async def cmd_metricas(message: Message, ai: GroqService) -> None:
+    if message.from_user is None:
+        return
+    if ai.metrics is None:
+        await message.answer("Las métricas no están habilitadas en esta instancia.")
+        return
+    text = ai.metrics.format_summary(message.from_user.id, "telegram", days=7)
+    await message.answer(text)
 
 
 @router.message(Command("reset"))
