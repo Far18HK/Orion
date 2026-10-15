@@ -614,6 +614,11 @@ class GroqService:
                     await asyncio.sleep(wait)
                 else:
                     raise
+        # Si llegamos aquí es porque agotamos todos los intentos sin éxito ni excepción
+        # (p.ej. rotación de clave TPD cuando ya no hay más claves). Nunca retornar None.
+        raise self._handle_error(
+            Exception("Groq agotó todos los reintentos sin respuesta")
+        )
 
     async def _run_team(self, task: str) -> str:
         """Ejecuta analistas en paralelo y usa la última clave para sintetizar."""
