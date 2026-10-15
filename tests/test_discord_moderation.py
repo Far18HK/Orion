@@ -1,6 +1,6 @@
 import pytest
 
-from services.discord_moderation import DiscordModerationError, _parse_iso, _guild_allowed
+from services.discord_moderation import DiscordModerationError, _guild_allowed, _parse_iso
 
 
 def test_event_dates_are_normalized_to_utc():
