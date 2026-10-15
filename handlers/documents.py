@@ -54,6 +54,7 @@ async def handle_document(message: Message, ai: GroqService) -> None:
                     message.from_user.id,
                     f"Transcripción del archivo {name}:\n{transcript}\n\nPetición: {question}",
                     chat_id=message.chat.id,
+                    action_notice=message.answer,
                 )
                 truncated = False
             elif extension in IMAGE_EXTENSIONS:
@@ -64,7 +65,8 @@ async def handle_document(message: Message, ai: GroqService) -> None:
             elif extension in SUPPORTED_EXTENSIONS:
                 text, truncated = await extract_text(data, name)
                 answer = await ai.ask_about_document(
-                    message.from_user.id, name, text, question, chat_id=message.chat.id
+                    message.from_user.id, name, text, question, chat_id=message.chat.id,
+                    action_notice=message.answer,
                 )
             else:
                 truncated = False
@@ -75,6 +77,7 @@ async def handle_document(message: Message, ai: GroqService) -> None:
                     "Usa list_files/read_file si necesitas inspeccionarlo. Si es binario, "
                     "explica sus metadatos y qué operación puedes hacer sin inventar contenido.",
                     chat_id=message.chat.id,
+                    action_notice=message.answer,
                 )
         except (DocumentError, GroqError) as e:
             await message.answer(str(e))

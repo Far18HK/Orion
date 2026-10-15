@@ -39,9 +39,9 @@ async def send_answer(target: Message, ai: GroqService, user_id: int, answer: st
     for index, chunk in enumerate(chunks):
         pending = index == len(chunks) - 1 and ai.has_pending_approval(user_id)
         await target.answer(chunk, parse_mode=None, reply_markup=approval_keyboard() if pending else None)
-    created = re.findall(r"ARCHIVO_CREADO:(\S+)", answer)
+    created = re.findall(r"(?m)^ARCHIVO_CREADO:(.+?)\s*$", answer)
     for raw_path in dict.fromkeys(created):
-        path = Path(raw_path)
+        path = Path(raw_path.strip())
         valid_file = await asyncio.to_thread(_file_ready, path)
         if valid_file:
             await target.answer_document(FSInputFile(path), caption=f"Archivo listo: {path.name}")
@@ -57,8 +57,16 @@ async def chat_with_ai(message: Message, ai: GroqService) -> None:
 
     # Muestra progreso si una consulta con herramientas tarda más de unos segundos.
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        async def action_notice(text: str) -> None:
+            await message.answer(text, parse_mode=None)
+
         request = asyncio.create_task(
-            ai.ask(message.from_user.id, message.text, chat_id=message.chat.id)
+            ai.ask(
+                message.from_user.id,
+                message.text,
+                chat_id=message.chat.id,
+                action_notice=action_notice,
+            )
         )
         progress = asyncio.create_task(asyncio.sleep(4.0))
         try:

@@ -1,7 +1,7 @@
-"""Aprobación humana de acciones con efectos y reanudación de turnos interrumpidos.
+"""Compatibilidad con checkpoints antiguos y reanudación de turnos interrumpidos.
 
-Cuando el agente quiere hacer algo sensible (publicar en Discord, crear una automatización...),
-el turno se PAUSA y Orion pregunta. Aquí se responde: botones, /aprobar o /rechazar.
+Las versiones actuales ejecutan acciones automáticamente y avisan sus riesgos antes de actuar.
+Estos handlers solo resuelven checkpoints antiguos que todavía estén esperando aprobación.
 Si el bot se reinició a mitad de un turno, /reanudar lo retoma desde el último paso guardado.
 """
 import logging

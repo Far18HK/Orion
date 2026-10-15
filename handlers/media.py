@@ -56,7 +56,12 @@ async def handle_voice(message: Message, ai: GroqService) -> None:
         try:
             # Primero transcribimos el audio con Whisper, luego lo tratamos como un mensaje normal
             transcript = await ai.transcribe(buffer.read())
-            answer = await ai.ask(message.from_user.id, transcript, chat_id=message.chat.id)
+            answer = await ai.ask(
+                message.from_user.id,
+                transcript,
+                chat_id=message.chat.id,
+                action_notice=message.answer,
+            )
         except GroqError as e:
             await message.answer(str(e))
             return
