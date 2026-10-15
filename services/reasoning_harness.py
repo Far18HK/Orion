@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -60,6 +61,7 @@ class HarnessResult:
     content: str = ""
     thread_id: str = ""
     pending: list[dict] = field(default_factory=list)  # llamadas esperando aprobación
+    created_files: tuple[str, ...] = ()  # rutas emitidas por herramientas de archivos
 
     @property
     def interrupted(self) -> bool:
@@ -182,7 +184,19 @@ class ReasoningHarness:
                 calls = first.get("calls", []) if isinstance(first, dict) else []
                 return HarnessResult(thread_id=thread_id, pending=list(calls))
         assistant = (result or {}).get("assistant") or {}
-        return HarnessResult(content=assistant.get("content") or "", thread_id=thread_id)
+        created: list[str] = []
+        for message in (result or {}).get("messages", []):
+            if message.get("role") != "tool":
+                continue
+            for raw_path in re.findall(r"(?m)^ARCHIVO_CREADO:(.+?)\s*$", str(message.get("content", ""))):
+                path = raw_path.strip()
+                if path and path not in created:
+                    created.append(path)
+        return HarnessResult(
+            content=assistant.get("content") or "",
+            thread_id=thread_id,
+            created_files=tuple(created),
+        )
 
     async def _model_node(self, state: HarnessState, config: RunnableConfig) -> HarnessState:
         configurable = config.get("configurable", {})

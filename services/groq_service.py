@@ -76,6 +76,7 @@ SYSTEM_PROMPT = (
     "- Nunca digas que hiciste algo (recordatorio, nota, cancelación) si la herramienta no "
     "confirmó éxito. Si falló, dilo y corrige o explica el motivo.\n"
     "- Al terminar una acción, confirma en una línea qué quedó hecho y para cuándo, sin discursos largos.\n"
+    "- Nunca pidas autorización para usar herramientas: antes de cada acción con efectos, informa brevemente qué harás y sus riesgos; después ejecútala automáticamente.\n"
     "- Para archivos usa list_files y read_file. Para crear archivos usa write_file; para binarios "
     "solo usa write_binary_file si tienes Base64 real, y para empaquetar usa zip_files. Nunca ejecutes "
     "un .py, .sh, .exe, macro o binario por tu cuenta. Al crear un archivo conserva literalmente "
@@ -113,6 +114,13 @@ RETRY_WAIT_MAX = 20  # Segundos máximos que esperamos un 429 antes de reintenta
 MAX_TOOL_ROUNDS = 3  # Menos rondas = menor latencia; las herramientas paralelas siguen disponibles.
 MAX_TOTAL_TOOL_CALLS = 12  # Presupuesto duro por ejecución: 3 rondas x 4 llamadas paralelas.
 MAX_MEMORY_CONTEXT_CHARS = 1800
+ACTION_RISK_TOOLS = frozenset({
+    "create_reminder", "cancel_reminder", "set_timezone", "save_note", "edit_note",
+    "delete_notes", "remember", "forget", "create_task", "complete_task", "create_automation",
+    "write_file", "write_binary_file", "zip_files", "openhands_file_editor",
+    "send_discord_dm", "write_discord_channel", "create_discord_event",
+    "timeout_discord_member", "delete_discord_message",
+})
 DEFAULT_SENSITIVE_TOOLS = frozenset({
     "write_discord_channel",
     "send_discord_dm",
@@ -127,6 +135,18 @@ DEFAULT_SENSITIVE_TOOLS = frozenset({
     "write_binary_file",
     "zip_files",
     "openhands_file_editor",
+})
+DISCORD_PROTECTED_TOOLS = frozenset({
+    "send_discord_dm",
+    "write_discord_channel",
+    "create_discord_event",
+    "timeout_discord_member",
+    "delete_discord_message",
+})
+TELEGRAM_REMINDER_PROTECTED_TOOLS = frozenset({
+    "create_reminder",
+    "cancel_reminder",
+    "set_timezone",
 })
 
 
@@ -168,6 +188,7 @@ class GroqService:
         store: AssistantStore | None = None,
         checkpointer=None,
         approval_tools: frozenset[str] = frozenset(),
+        approval_bypass_user_ids: frozenset[int] = frozenset(),
         pydantic_enabled: bool = True,
         workspace_root: str = "orion_workspace",
         metrics: MetricsStore | None = None,
@@ -247,6 +268,7 @@ class GroqService:
         self._models_cache: tuple[float, list[str]] | None = None
         # Herramientas con efectos que exigen un sí humano (el harness pausa con interrupt())
         self.approval_tools = approval_tools
+        self.approval_bypass_user_ids = approval_bypass_user_ids
         unknown = approval_tools - {tool.name for tool in TOOLS}
         if unknown:
             logger.warning("APPROVAL_TOOLS contiene herramientas inexistentes: %s", sorted(unknown))
@@ -674,6 +696,15 @@ class GroqService:
             )
             if previous is not None:
                 return {"role": "tool", "tool_call_id": call.id, "content": previous}
+        if ctx.action_notice is not None and call.function.name in ACTION_RISK_TOOLS:
+            try:
+                await ctx.action_notice(
+                    f"⚠️ Voy a ejecutar `{call.function.name}`.\n"
+                    f"Riesgos: esta acción puede modificar datos, crear una tarea programada, "
+                    f"enviar un mensaje o cambiar archivos. Detalle: {describe_call(call.function.name, call.function.arguments)}"
+                )
+            except Exception:  # noqa: BLE001 - el aviso no debe impedir la ejecución autónoma
+                logger.warning("No se pudo enviar el aviso de riesgo", exc_info=True)
         result = await run_tool(call.function.name, call.function.arguments, ctx)
         if ctx.store is not None:
             ctx.store.finish_operation(ctx.user_id, ctx.platform, operation_id, result)
@@ -681,13 +712,13 @@ class GroqService:
         return {"role": "tool", "tool_call_id": call.id, "content": result}
 
     def _needs_approval(self, name: str, ctx: ToolContext) -> bool:
-        # La configuración puede añadir herramientas, pero nunca reduce esta lista
-        # mínima de acciones con efectos externos o destructivos.
-        return name in self.approval_tools or name in DEFAULT_SENSITIVE_TOOLS
+        # La ejecución es autónoma: no se pausa ni se pide confirmación. Las acciones
+        # con efectos informan sus riesgos justo antes de ejecutarse mediante action_notice.
+        return False
 
     def _build_context(
         self, user_id: int, platform: str, chat_id: int | None, guild_id: int | None = None,
-        agent_name: str = "general",
+        agent_name: str = "general", action_notice=None,
     ) -> ToolContext:
         """Qué puede hacer el agente en este turno (permisos por usuario y plataforma)."""
         return ToolContext(
@@ -746,6 +777,7 @@ class GroqService:
             store=self.store,
             workspace_root=self.workspace_root,
             agent_name=agent_name,
+            action_notice=action_notice,
         )
 
     async def _structured_plan(self, objective: str, user_id: int, platform: str) -> str:
@@ -789,6 +821,7 @@ class GroqService:
         platform: str = "telegram",
         interactive: bool = True,
         guild_id: int | None = None,
+        action_notice=None,
     ) -> str:
         """Corre el agente: el modelo decide si responde directo o usa herramientas.
 
@@ -808,7 +841,7 @@ class GroqService:
                 # Si había una acción esperando un sí/no y siguió con otra cosa, no se ejecuta
                 await self._discard_pending(user_id, platform)
             profile = route(text)
-            ctx = self._build_context(user_id, platform, chat_id, guild_id, profile.name)
+            ctx = self._build_context(user_id, platform, chat_id, guild_id, profile.name, action_notice)
             specs = filter_specs(build_tool_specs(ctx), profile)
             self._load_persistent_history(key, user_id, platform)
             messages = [
@@ -1070,6 +1103,14 @@ class GroqService:
                 self.store.update_agent_run(run_id, "failed", failure_reason="El modelo no produjo una respuesta")
             raise GroqError("No pude generar respuesta para eso 🤔 ¿Lo intentas de otra forma?")
 
+        # El modelo puede omitir el marcador aunque la herramienta sí haya creado
+        # el archivo. Lo reinyectamos desde la evidencia estructurada del harness
+        # para que Telegram pueda adjuntarlo físicamente.
+        markers = [f"ARCHIVO_CREADO:{path}" for path in result.created_files]
+        missing_markers = [marker for marker in markers if marker not in answer]
+        if missing_markers:
+            answer = answer.rstrip() + "\n\n" + "\n".join(missing_markers)
+
         # Solo guardamos la pregunta y la respuesta final, no las idas y vueltas con herramientas
         history = self._history[key]
         history.append({"role": "user", "content": saved or text})
@@ -1109,6 +1150,7 @@ class GroqService:
         question: str,
         chat_id: int | None = None,
         platform: str = "telegram",
+        action_notice=None,
     ) -> str:
         """Carga un documento como contexto y responde la pregunta sobre él."""
         key = self._key(user_id, platform)
@@ -1121,6 +1163,7 @@ class GroqService:
                 saved_as=f"[Documento enviado: {filename}] {question}",
                 chat_id=chat_id,
                 platform=platform,
+                action_notice=action_notice,
             )
         except GroqError:
             if previous:

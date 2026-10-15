@@ -96,6 +96,7 @@ class ToolContext:
     store: AssistantStore | None = None
     workspace_root: str | None = None
     agent_name: str = "general"
+    action_notice: Callable[[str], Awaitable[None]] | None = None
 
 
 def format_now(now: datetime) -> str:
