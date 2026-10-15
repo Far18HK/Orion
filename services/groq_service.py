@@ -538,7 +538,18 @@ class GroqService:
                 if tools:
                     kwargs["tools"] = tools
                     kwargs["tool_choice"] = "auto"
-                return await self._openrouter.chat.completions.create(**kwargs)
+                response = await self._openrouter.chat.completions.create(**kwargs)
+                # Algunos modelos free de OpenRouter devuelven 200 OK pero con choices
+                # vacío o None (content filtering, contexto demasiado largo, bug del modelo).
+                # En ese caso hacemos fallback a Groq en lugar de propagar un None.
+                if not response or not response.choices:
+                    logger.warning(
+                        "OpenRouter devolvió 200 pero sin choices (modelo: %s); "
+                        "uso Groq como fallback.",
+                        model,
+                    )
+                    return await self._complete_groq(self.groq_model, messages, tools)
+                return response
             except Exception as e:  # noqa: BLE001 - el fallback evita dejar al usuario sin respuesta
                 error_text = str(e).lower()
                 permanent_model_error = getattr(e, "status_code", None) in {400, 404} and (
