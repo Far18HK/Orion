@@ -21,6 +21,8 @@ async def read_recent_messages(
     limit: int = 25,
     query: str = "",
     allow_all_channels: bool = False,
+    allowed_guild_ids: frozenset[int] = frozenset(),
+    guild_id: int | None = None,
 ) -> str:
     """Lee mensajes recientes; el acceso global depende además de permisos del bot en Discord."""
     if not allow_all_channels and channel_id not in allowed_channel_ids:
@@ -33,6 +35,15 @@ async def read_recent_messages(
         "User-Agent": "OrionDiscordMonitor/1.0",
     }
     async with aiohttp.ClientSession(timeout=TIMEOUT, headers=headers) as session:
+        if allow_all_channels and allowed_guild_ids:
+            channel_guild_id = guild_id
+            if channel_guild_id is None:
+                async with session.get(f"{API}/channels/{channel_id}") as metadata:
+                    if metadata.status >= 400:
+                        raise DiscordMonitorError("No pude comprobar el servidor de ese canal.")
+                    channel_guild_id = int((await metadata.json()).get("guild_id") or 0)
+            if channel_guild_id not in allowed_guild_ids:
+                raise DiscordMonitorError("Ese canal pertenece a un servidor no autorizado.")
         async with session.get(
             f"{API}/channels/{channel_id}/messages", params={"limit": limit}
         ) as response:
@@ -74,6 +85,8 @@ async def send_channel_message(
     allowed_channel_ids: frozenset[int],
     content: str,
     allow_all_channels: bool = False,
+    allowed_guild_ids: frozenset[int] = frozenset(),
+    guild_id: int | None = None,
 ) -> str:
     """Envía un mensaje; Discord sigue siendo la autoridad final de permisos."""
     if not allow_all_channels and channel_id not in allowed_channel_ids:
@@ -90,6 +103,15 @@ async def send_channel_message(
         "User-Agent": "OrionDiscordMonitor/1.0",
     }
     async with aiohttp.ClientSession(timeout=TIMEOUT, headers=headers) as session:
+        if allow_all_channels and allowed_guild_ids:
+            channel_guild_id = guild_id
+            if channel_guild_id is None:
+                async with session.get(f"{API}/channels/{channel_id}") as metadata:
+                    if metadata.status >= 400:
+                        raise DiscordMonitorError("No pude comprobar el servidor de ese canal.")
+                    channel_guild_id = int((await metadata.json()).get("guild_id") or 0)
+            if channel_guild_id not in allowed_guild_ids:
+                raise DiscordMonitorError("Ese canal pertenece a un servidor no autorizado.")
         async with session.post(
             f"{API}/channels/{channel_id}/messages", json={"content": content}
         ) as response:

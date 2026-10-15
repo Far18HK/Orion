@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import mimetypes
-import os
+import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_READ_CHARS = 40_000
+# Cuota por usuario: cuántos bytes pueden ocupar en total en su workspace
+WORKSPACE_QUOTA_BYTES = 200 * 1024 * 1024  # 200 MB
+# Antigüedad máxima de archivos para limpieza automática (días)
+CLEANUP_MAX_AGE_DAYS = 30
+
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".csv", ".json", ".log", ".xml", ".html", ".yaml", ".yml", ".ini",
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".sql", ".toml", ".css", ".sh",
@@ -42,6 +47,7 @@ def safe_path(root: str | Path, user_id: int, requested: str, platform: str = "t
 def save_attachment(root: str | Path, user_id: int, filename: str, data: bytes, platform: str = "telegram") -> Path:
     if len(data) > MAX_FILE_BYTES:
         raise WorkspaceError("El archivo supera el límite de 50 MB.")
+    check_quota(root, user_id, len(data), platform)
     name = Path(filename or "archivo").name or "archivo"
     target = safe_path(root, user_id, f"inbox/{name}", platform)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -60,10 +66,67 @@ def _describe_zip(path: Path) -> str:
         raise WorkspaceError("El archivo .zip está dañado o no es un ZIP válido.") from exc
 
 
+def workspace_usage(root: str | Path, user_id: int, platform: str = "telegram") -> int:
+    """Total de bytes ocupados por el usuario en su workspace."""
+    base = user_root(root, user_id, platform)
+    return sum(p.stat().st_size for p in base.rglob("*") if p.is_file())
+
+
+def check_quota(root: str | Path, user_id: int, new_bytes: int, platform: str = "telegram") -> None:
+    """Lanza WorkspaceError si añadir new_bytes supera la cuota del usuario."""
+    used = workspace_usage(root, user_id, platform)
+    if used + new_bytes > WORKSPACE_QUOTA_BYTES:
+        quota_mb = WORKSPACE_QUOTA_BYTES // (1024 * 1024)
+        used_mb = used // (1024 * 1024)
+        raise WorkspaceError(
+            f"Cuota de almacenamiento alcanzada ({used_mb} MB de {quota_mb} MB). "
+            "Borra archivos con /archivos borrar antes de guardar más."
+        )
+
+
+def delete_file(root: str | Path, user_id: int, filename: str, platform: str = "telegram") -> int:
+    """Borra un archivo del workspace. Devuelve los bytes liberados."""
+    path = safe_path(root, user_id, filename, platform)
+    if not path.is_file():
+        raise WorkspaceError(f"No existe el archivo: {filename}")
+    size = path.stat().st_size
+    path.unlink()
+    # Eliminar directorios vacíos que queden
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+    return size
+
+
+def cleanup_old_files(
+    root: str | Path, user_id: int, platform: str = "telegram", max_age_days: int = CLEANUP_MAX_AGE_DAYS
+) -> tuple[int, int]:
+    """Borra archivos más viejos que max_age_days. Devuelve (archivos_borrados, bytes_liberados)."""
+    base = user_root(root, user_id, platform)
+    cutoff = time.time() - max_age_days * 86400
+    deleted_files = 0
+    freed_bytes = 0
+    for path in list(base.rglob("*")):
+        if path.is_file() and path.stat().st_mtime < cutoff:
+            size = path.stat().st_size
+            try:
+                path.unlink()
+                deleted_files += 1
+                freed_bytes += size
+            except OSError:
+                pass
+    return deleted_files, freed_bytes
+
+
 def describe_file(path: Path) -> str:
     stat = path.stat()
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    digest_builder = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest_builder.update(chunk)
+    digest = digest_builder.hexdigest()[:16]
     lines = [f"Archivo: {path.name}", f"Tamaño: {stat.st_size} bytes", f"Tipo estimado: {mime}", f"SHA-256: {digest}"]
     if path.suffix.lower() == ".zip":
         lines.append(_describe_zip(path))
@@ -95,6 +158,7 @@ def write_text(root: str | Path, user_id: int, filename: str, content: str, plat
     data = str(content).encode("utf-8")
     if len(data) > MAX_FILE_BYTES:
         raise WorkspaceError("El archivo generado supera el límite de 50 MB.")
+    check_quota(root, user_id, len(data), platform)
     target = safe_path(root, user_id, filename, platform)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
@@ -108,6 +172,7 @@ def write_base64(root: str | Path, user_id: int, filename: str, encoded: str, pl
         raise WorkspaceError("El contenido no es Base64 válido.") from exc
     if len(data) > MAX_FILE_BYTES:
         raise WorkspaceError("El archivo generado supera el límite de 50 MB.")
+    check_quota(root, user_id, len(data), platform)
     target = safe_path(root, user_id, filename, platform)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
@@ -123,6 +188,8 @@ def make_zip(root: str | Path, user_id: int, output: str, files: list[str], plat
         path = safe_path(root, user_id, requested, platform)
         if not path.is_file():
             raise WorkspaceError(f"No existe el archivo: {requested}")
+        if path == target:
+            raise WorkspaceError("El ZIP de salida no puede incluirse a sí mismo.")
         unique.append(path)
     if not unique:
         raise WorkspaceError("Indica al menos un archivo para comprimir.")

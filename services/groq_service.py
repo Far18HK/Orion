@@ -11,15 +11,16 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from openai import AsyncOpenAI
 from groq import AsyncGroq
+from openai import AsyncOpenAI
 
+from services.agent_router import PROFILES, filter_specs, route
 from services.assistant_store import AssistantStore
 from services.github import GitHubService
 from services.notion import NotionService
-from services.reasoning_harness import HarnessPolicy, ReasoningHarness
 from services.pydantic_harness import PydanticHarness
-from services.agent_router import PROFILES, filter_specs, route
+from services.reasoning_harness import HarnessPolicy, ReasoningHarness
+from services.metrics import MetricsStore
 from services.reminders import ReminderService
 from services.tools import (
     TOOLS,
@@ -125,6 +126,7 @@ DEFAULT_SENSITIVE_TOOLS = frozenset({
     "write_file",
     "write_binary_file",
     "zip_files",
+    "openhands_file_editor",
 })
 
 
@@ -157,6 +159,7 @@ class GroqService:
         discord_write_channel_ids: frozenset[int] = frozenset(),
         discord_monitor_all_channels: bool = False,
         discord_write_all_channels: bool = False,
+        discord_all_channel_guild_ids: frozenset[int] = frozenset(),
         discord_moderator_user_ids: frozenset[int] = frozenset(),
         discord_moderator_telegram_ids: frozenset[int] = frozenset(),
         discord_moderator_guild_ids: frozenset[int] = frozenset(),
@@ -167,6 +170,7 @@ class GroqService:
         approval_tools: frozenset[str] = frozenset(),
         pydantic_enabled: bool = True,
         workspace_root: str = "orion_workspace",
+        metrics: MetricsStore | None = None,
     ) -> None:
         if not api_keys:
             raise ValueError("GroqService necesita al menos una API key de Groq")
@@ -204,6 +208,7 @@ class GroqService:
         self.discord_write_channel_ids = discord_write_channel_ids
         self.discord_monitor_all_channels = discord_monitor_all_channels
         self.discord_write_all_channels = discord_write_all_channels
+        self.discord_all_channel_guild_ids = discord_all_channel_guild_ids
         self.discord_moderator_user_ids = discord_moderator_user_ids
         self.discord_moderator_telegram_ids = discord_moderator_telegram_ids
         self.discord_moderator_guild_ids = discord_moderator_guild_ids
@@ -213,6 +218,7 @@ class GroqService:
             self.multi_brain_size = 0
         self.store = store
         self.workspace_root = workspace_root
+        self.metrics = metrics
         self.pydantic_harness: PydanticHarness | None = None
         enabled = pydantic_enabled and os.getenv("PYDANTICAI_ENABLED", "true").lower() not in {
             "0", "false", "no"
@@ -480,7 +486,7 @@ class GroqService:
             (i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1
         )
         limit = last_assistant if keep_latest_round else len(messages)
-        for i, m in enumerate(messages[:limit]):
+        for _i, m in enumerate(messages[:limit]):
             if m["role"] == "tool" and len(m["content"]) > OLD_RESULT_CHARS + 40:
                 m["content"] = (
                     m["content"][:OLD_RESULT_CHARS] + " […recortado para ahorrar espacio]"
@@ -713,6 +719,7 @@ class GroqService:
             discord_write_channel_ids=self.discord_write_channel_ids,
             discord_monitor_all_channels=self.discord_monitor_all_channels,
             discord_write_all_channels=self.discord_write_all_channels,
+            discord_all_channel_guild_ids=self.discord_all_channel_guild_ids,
             discord_moderator_token=(
                 self.discord_token
                 if (
@@ -795,6 +802,7 @@ class GroqService:
         función devuelve la pregunta para el usuario; se responde con `resolve_pending`.
         """
         key = self._key(user_id, platform)
+        _t0 = time.monotonic()
         try:
             if interactive:
                 # Si había una acción esperando un sí/no y siguió con otra cosa, no se ejecuta
@@ -842,6 +850,7 @@ class GroqService:
             saved=saved,
             run_id=run_id,
             interactive=interactive,
+            t0=_t0,
         )
 
     # ------------------------------------------------------------ aprobación y reanudación
@@ -900,6 +909,7 @@ class GroqService:
             text=text,
             saved=saved,
             run_id=run_id,
+            t0=time.monotonic(),
         )
 
     async def resume_interrupted(
@@ -938,6 +948,7 @@ class GroqService:
             text=text,
             saved=saved,
             run_id=run_id,
+            t0=time.monotonic(),
         )
 
     def _save_turn(
@@ -1003,9 +1014,12 @@ class GroqService:
         saved: str,
         run_id: str | None = None,
         interactive: bool = True,
+        t0: float | None = None,
     ) -> str:
         """Ejecuta (o reanuda) un turno y decide qué queda guardado según cómo termine."""
         key = self._key(user_id, platform)
+        if t0 is None:
+            t0 = time.monotonic()
         self._active_threads.add(thread_id)
         try:
             result = await call()
@@ -1017,6 +1031,21 @@ class GroqService:
             if self.store and run_id:
                 self.store.update_agent_run(run_id, "failed", failure_reason=str(e))
             await self.harness.discard(thread_id)
+            # Registrar error en métricas
+            if self.metrics:
+                error_type = type(e).__name__
+                status = getattr(e, "status_code", None)
+                if status:
+                    error_type = f"http_{status}"
+                try:
+                    self.metrics.record_error(user_id, platform, error_type, str(e)[:200])
+                    self.metrics.record_turn(
+                        user_id=user_id, platform=platform, model=model,
+                        latency_s=time.monotonic() - t0, success=False,
+                        agent_name=ctx.agent_name,
+                    )
+                except Exception:
+                    logger.debug("No se pudo registrar métrica de error", exc_info=True)
             raise self._handle_error(e) from e
         finally:
             self._active_threads.discard(thread_id)
@@ -1050,6 +1079,26 @@ class GroqService:
             self.store.save_conversation_turn(user_id, platform, "assistant", answer)
             if run_id:
                 self.store.update_agent_run(run_id, "done", result=answer)
+
+        # Registrar métricas del turno
+        if self.metrics:
+            try:
+                tools_used = list(dict.fromkeys(
+                    c.get("name", "") for c in (result.pending or [])
+                    if c.get("name")
+                ))
+                self.metrics.record_turn(
+                    user_id=user_id,
+                    platform=platform,
+                    model=model,
+                    latency_s=time.monotonic() - t0,
+                    success=True,
+                    tools_used=tools_used,
+                    agent_name=ctx.agent_name,
+                )
+            except Exception:
+                logger.debug("No se pudo registrar métrica de turno", exc_info=True)
+
         return answer
 
     async def ask_about_document(

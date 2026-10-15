@@ -11,7 +11,7 @@ from aiogram import Bot
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from services.schedule_parser import ReminderError, parse_duration, parse_reminder
+from services.schedule_parser import ReminderError, parse_reminder
 
 MAX_PER_CHAT = 20  # Tope de recordatorios pendientes por chat
 

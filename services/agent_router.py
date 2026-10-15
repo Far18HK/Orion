@@ -33,7 +33,7 @@ PROFILES = {
     ),
     "coding": AgentProfile(
         "coding", "Programación y repositorios.",
-        frozenset({"github_list_repos", "github_repo_overview", "github_list_files", "github_read_file", "github_search_code", "github_recent_commits", "github_issues", "list_files", "read_file", "write_file", "zip_files", "plan_task", "verify_step", "team_reason"}),
+        frozenset({"github_list_repos", "github_repo_overview", "github_list_files", "github_read_file", "github_search_code", "github_recent_commits", "github_issues", "list_files", "read_file", "write_file", "zip_files", "openhands_file_editor", "plan_task", "verify_step", "team_reason"}),
         "Analiza código con evidencia. No ejecutes scripts ni cambies repositorios externos sin una herramienta explícita y aprobación.",
     ),
     "research": AgentProfile(

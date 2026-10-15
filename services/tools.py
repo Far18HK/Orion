@@ -22,23 +22,24 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from ddgs import DDGS
 
-from services.discord_monitor import (
-    DiscordMonitorError,
-    read_recent_messages,
-    send_channel_message,
-)
+from services.assistant_store import AssistantStore
+from services.automation_service import next_run_for
 from services.discord_moderation import (
     DiscordModerationError,
     create_scheduled_event,
     delete_message,
     timeout_member,
 )
-from services.assistant_store import AssistantStore
-from services.automation_service import next_run_for
+from services.discord_monitor import (
+    DiscordMonitorError,
+    read_recent_messages,
+    send_channel_message,
+)
 
 _DAILY_SCHEDULE = re.compile(r"^cada\s+(día|dia)\s+(\d{1,2}):(\d{2})$", re.IGNORECASE)
 from services.github import GitHubError, GitHubService
 from services.notion import NotionError, NotionService
+from services.openhands_editor import run_openhands_editor
 from services.reminders import ReminderService
 from services.schedule_parser import ReminderError, find_timezones, format_when
 from services.workspace import (
@@ -83,6 +84,7 @@ class ToolContext:
     discord_write_channel_ids: frozenset[int] = frozenset()
     discord_monitor_all_channels: bool = False
     discord_write_all_channels: bool = False
+    discord_all_channel_guild_ids: frozenset[int] = frozenset()
     discord_moderator_token: str | None = None
     discord_moderator_guild_ids: frozenset[int] = frozenset()
     discord_guild_id: int | None = None
@@ -559,6 +561,8 @@ async def _t_read_discord_channel(ctx: ToolContext, args: dict) -> str:
             limit=int(args.get("limit", 25)),
             query=str(args.get("query", "")),
             allow_all_channels=ctx.discord_monitor_all_channels,
+            allowed_guild_ids=ctx.discord_all_channel_guild_ids,
+            guild_id=ctx.discord_guild_id,
         )
     except (DiscordMonitorError, ValueError) as e:
         return f"Error: {e}"
@@ -579,6 +583,8 @@ async def _t_write_discord_channel(ctx: ToolContext, args: dict) -> str:
             ctx.discord_write_channel_ids,
             str(args.get("text", "")),
             allow_all_channels=ctx.discord_write_all_channels,
+            allowed_guild_ids=ctx.discord_all_channel_guild_ids,
+            guild_id=ctx.discord_guild_id,
         )
     except (DiscordMonitorError, ValueError) as e:
         return f"Error: {e}"
@@ -793,6 +799,19 @@ async def _t_zip_files(ctx: ToolContext, args: dict) -> str:
             files, ctx.platform,
         )
         return f"ARCHIVO_CREADO:{path}\nZIP creado con {len(files)} archivo(s): {path.name}"
+    except WorkspaceError as exc:
+        return f"Error: {exc}"
+
+
+async def _t_openhands_file_editor(ctx: ToolContext, args: dict) -> str:
+    try:
+        return await asyncio.to_thread(
+            run_openhands_editor,
+            _workspace_required(ctx),
+            ctx.user_id,
+            ctx.platform,
+            args,
+        )
     except WorkspaceError as exc:
         return f"Error: {exc}"
 
@@ -1131,6 +1150,24 @@ TOOLS: list[Tool] = [
         "Comprime archivos existentes del espacio de trabajo en un ZIP.",
         {"output": _str("Nombre del ZIP de salida."), "files": {"type": "array", "items": {"type": "string"}}},
         ("output", "files"), _t_zip_files, needs="workspace_root",
+    ),
+    Tool(
+        "openhands_file_editor",
+        "Edita código y archivos de texto usando OpenHands ACI dentro del workspace privado. "
+        "Primero usa command=view; después puedes usar str_replace para reemplazar un texto único, "
+        "insert para insertar líneas, create para crear archivos y undo_edit para deshacer la última edición. "
+        "Nunca uses rutas absolutas ni salgas del workspace. Las mutaciones requieren aprobación humana.",
+        {
+            "command": _str("Operación: view, create, str_replace, insert o undo_edit.", enum=["view", "create", "str_replace", "insert", "undo_edit"]),
+            "path": _str("Ruta relativa al workspace; no uses / ni ../."),
+            "file_text": _str("Contenido completo para create; obligatorio solo con create."),
+            "view_range": {"type": "array", "items": {"type": "integer"}, "description": "Dos líneas [inicio, fin] para view; fin=-1 significa hasta el final."},
+            "old_str": _str("Texto literal único que se reemplazará con str_replace."),
+            "new_str": _str("Texto nuevo para str_replace o insert."),
+            "insert_line": {"type": "integer", "description": "Línea después de la cual insertar; usa 0 para el principio."},
+            "enable_linting": {"type": "boolean", "description": "Ejecuta el linting de OpenHands sobre la edición cuando sea posible."},
+        },
+        ("command", "path"), _t_openhands_file_editor, needs="workspace_root",
     ),
     Tool("create_automation", "Registra una automatización futura, sin ejecutarla todavía.", {"instruction": _str("Qué debe hacer."), "schedule": _str("Horario o frecuencia.")}, ("instruction", "schedule"), _t_create_automation, needs="store"),
     Tool("audit_log", "Muestra acciones recientes del asistente.", {"limit": {"type": "integer"}}, (), _t_audit, needs="store"),
