@@ -74,9 +74,17 @@ class DiscordFront(discord.Client):
                         async with session.get(attachment.url) as response:
                             if response.status >= 400:
                                 raise WorkspaceError(f"Discord no permitió descargar {attachment.filename}.")
-                            data = await response.read()
-                        if len(data) > 50 * 1024 * 1024:
-                            raise WorkspaceError(f"{attachment.filename} supera 50 MB.")
+                            declared = int(response.headers.get("Content-Length", "0") or 0)
+                            if declared > 50 * 1024 * 1024:
+                                raise WorkspaceError(f"{attachment.filename} supera 50 MB.")
+                            chunks = []
+                            total = 0
+                            async for chunk in response.content.iter_chunked(1024 * 1024):
+                                total += len(chunk)
+                                if total > 50 * 1024 * 1024:
+                                    raise WorkspaceError(f"{attachment.filename} supera 50 MB.")
+                                chunks.append(chunk)
+                            data = b"".join(chunks)
                         saved.append(save_attachment(self.ai.workspace_root, message.author.id, attachment.filename, data, "discord"))
             except (WorkspaceError, aiohttp.ClientError) as exc:
                 await message.reply(f"No pude guardar el adjunto: {exc}")

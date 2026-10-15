@@ -7,12 +7,13 @@ from aiogram import Bot, Dispatcher
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from config import load_settings, resolve_checkpoint_path
-from handlers import agent_runs, approvals, chat, documents, media, model, notes, reminders, start
+from handlers import agent_runs, approvals, chat, documents, files, media, model, notes, reminders, start
+from services.metrics import MetricsStore
 from handlers.start import BOT_COMMANDS
 from middlewares import RateLimitMiddleware, UserGuardMiddleware
-from services.github import GitHubService
 from services.assistant_store import AssistantStore
 from services.automation_service import AutomationService
+from services.github import GitHubService
 from services.groq_service import GroqService
 from services.notion import NotionService
 from services.reminders import ReminderService
@@ -100,6 +101,7 @@ async def main() -> None:
         discord_write_channel_ids=settings.discord_write_channel_ids,
         discord_monitor_all_channels=settings.discord_monitor_all_channels,
         discord_write_all_channels=settings.discord_write_all_channels,
+        discord_all_channel_guild_ids=settings.discord_all_channel_guild_ids,
         discord_moderator_user_ids=settings.discord_moderator_user_ids,
         discord_moderator_telegram_ids=settings.discord_moderator_telegram_ids,
         discord_moderator_guild_ids=settings.discord_moderator_guild_ids,
@@ -109,6 +111,7 @@ async def main() -> None:
         checkpointer=checkpointer,
         approval_tools=settings.approval_tools,
         workspace_root=settings.workspace_dir,
+        metrics=MetricsStore(settings.db_path),
     )
     dp["ai"] = ai
     automation_service = AutomationService(
@@ -126,6 +129,7 @@ async def main() -> None:
     dp.include_router(model.router)
     dp.include_router(approvals.router)
     dp.include_router(agent_runs.router)
+    dp.include_router(files.router)
     dp.include_router(chat.router)
 
     # Menú de comandos (botón "/" en Telegram)

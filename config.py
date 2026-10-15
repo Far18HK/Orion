@@ -41,6 +41,7 @@ class Settings:
     discord_write_channel_ids: frozenset[int]  # Canales de Discord donde se puede escribir
     discord_monitor_all_channels: bool
     discord_write_all_channels: bool
+    discord_all_channel_guild_ids: frozenset[int]
     discord_moderator_user_ids: frozenset[int]
     discord_moderator_telegram_ids: frozenset[int]
     discord_moderator_guild_ids: frozenset[int]
@@ -159,6 +160,12 @@ def load_settings() -> Settings:
     discord_monitor_all_channels = os.getenv("DISCORD_MONITOR_ALL_CHANNELS", "false").lower() not in {"0", "false", "no"}
     discord_write_all_channels = os.getenv("DISCORD_WRITE_ALL_CHANNELS", "false").lower() not in {"0", "false", "no"}
     try:
+        discord_all_channel_guild_ids = frozenset(
+            int(x) for x in os.getenv("DISCORD_ALL_CHANNEL_GUILD_IDS", "").replace(" ", "").split(",") if x
+        )
+    except ValueError:
+        raise RuntimeError("DISCORD_ALL_CHANNEL_GUILD_IDS debe ser una lista de números") from None
+    try:
         discord_dm_ids = frozenset(
             int(x) for x in os.getenv("DISCORD_DM_IDS", "").replace(" ", "").split(",") if x
         )
@@ -226,6 +233,7 @@ def load_settings() -> Settings:
         discord_write_channel_ids=discord_write_channel_ids,
         discord_monitor_all_channels=discord_monitor_all_channels,
         discord_write_all_channels=discord_write_all_channels,
+        discord_all_channel_guild_ids=discord_all_channel_guild_ids,
         discord_moderator_user_ids=discord_moderator_user_ids,
         discord_moderator_telegram_ids=discord_moderator_telegram_ids,
         discord_moderator_guild_ids=discord_moderator_guild_ids,

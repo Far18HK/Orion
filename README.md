@@ -20,7 +20,9 @@ Asistente personal con IA para **Telegram** y opcionalmente **Discord**, constru
 - Arquitectura híbrida: LangGraph conserva el flujo durable, las interrupciones y la reanudación; PydanticAI aporta planes y verificaciones tipadas mediante `plan_task` y `verify_step`.
 - Estado operativo con `/estado`, proyectos aislados con `/proyecto` y checkpoints SQLite.
 - Ejecuciones autónomas persistentes consultables con `/ejecuciones` y cancelables con `/cancelar_ejecucion <id>`, con presupuesto de herramientas por turno.
-- Espacio de archivos privado por usuario: recibe adjuntos de cualquier extensión, conserva binarios, inspecciona texto y ZIP, crea archivos de texto o binarios Base64 y comprime archivos.
+- Espacio de archivos privado por usuario con cuota de 200 MB: recibe adjuntos de cualquier extensión, conserva binarios, inspecciona texto y ZIP, crea archivos de texto o binarios Base64 y comprime archivos. Gestión con `/archivos`, `/archivos borrar <nombre>` y `/archivos limpiar`.
+- Editor de código OpenHands ACI dentro del workspace privado: `view`, `create`, `str_replace`, `insert` y `undo_edit`, con rutas confinadas, cuota, auditoría y aprobación humana para mutaciones. Requiere Python 3.12+ porque `openhands-aci` está publicado con ese requisito.
+- Métricas de uso (latencia, tokens, herramientas, errores) registradas automáticamente en SQLite y consultables con `/metricas`.
 - Dispatcher interno con agentes especializados de archivos, Discord, código, investigación y multimedia; cada turno recibe solo las herramientas necesarias.
 - Aprobación humana real (`/aprobar`, `/rechazar` o botones) para acciones con efectos, y `/reanudar` para retomar un turno interrumpido.
 - Por seguridad, Orion también pide aprobación para DMs de Discord, editar/borrar notas y cancelar recordatorios.
@@ -68,6 +70,8 @@ Por seguridad, las rutas no pueden salir del espacio del usuario, los archivos e
 Para que Orion pueda revisar Discord cuando se lo pidas, configura `DISCORD_MONITOR_CHANNEL_IDS` con los IDs de canales permitidos, `DISCORD_MONITOR_USER_IDS` para usuarios de Discord y/o `DISCORD_MONITOR_TELEGRAM_IDS` para usuarios de Telegram. La lectura es bajo demanda; no se mantiene una vigilancia permanente.
 
 Si no quieres registrar canales uno por uno, establece `DISCORD_MONITOR_ALL_CHANNELS=true`. Orion intentará leer cualquier canal cuyo acceso permita el rol del bot; Discord sigue siendo la autoridad final y devolverá 403 si faltan **View Channel** o **Read Message History**. Para escritura existe `DISCORD_WRITE_ALL_CHANNELS=true`, pero se recomienda mantenerlo en `false` y usar `DISCORD_WRITE_CHANNEL_IDS`, porque publicar tiene efectos externos. Estas opciones son globales para los servidores donde el bot tenga acceso.
+
+Para evitar que el modo global abarque otros servidores donde también esté el bot, define `DISCORD_ALL_CHANNEL_GUILD_IDS` con los IDs permitidos. Si se deja vacío, se conserva el comportamiento global anterior.
 
 Para permitir que publique mensajes, configura además `DISCORD_WRITE_CHANNEL_IDS`. Es una lista separada y más restrictiva. Desde Telegram debes indicar el ID del canal; desde Discord puede usar el canal actual. El bot necesita también el permiso **Send Messages**.
 
